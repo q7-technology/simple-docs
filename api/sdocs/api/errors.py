@@ -7,15 +7,23 @@ field's name → what is wrong with it) comes only when the request itself had
 something wrong in it."""
 from __future__ import annotations
 
+import logging
+from collections.abc import Sequence
 from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 CHECK_FIELDS = "Check the fields marked."
+SERVER_ERROR = (
+    "Something went wrong on our side. Try again, and if it keeps happening tell an admin."
+)
+
+log = logging.getLogger("sdocs")
 
 
 class ApiError(Exception):
@@ -48,7 +56,7 @@ def forbidden(message: str = "Your role can't do that. Ask an admin.") -> ApiErr
     return ApiError(403, "forbidden", message)
 
 
-def commit_unique(db, taken: dict[str, ApiError]) -> None:
+def commit_unique(db: Session, taken: dict[str, ApiError]) -> None:
     """Commit, as the check before it said was fine. Two requests at once can
     both pass that check; the one that loses to a unique constraint named in
     `taken` gets that constraint's error, as if the check had caught it."""
@@ -62,7 +70,7 @@ def commit_unique(db, taken: dict[str, ApiError]) -> None:
         raise error from None
 
 
-def field_errors(errors) -> dict[str, str]:
+def field_errors(errors: Sequence[Any]) -> dict[str, str]:
     out: dict[str, str] = {}
     for e in errors:
         loc = [str(x) for x in e.get("loc", ()) if x != "body"]
@@ -98,3 +106,9 @@ def install(app: FastAPI) -> None:
         code, message = _STATUS.get(exc.status_code, ("error", str(exc.detail)))
         return JSONResponse(status_code=exc.status_code, content=body(code, message),
                             headers=exc.headers)
+
+    @app.exception_handler(Exception)
+    async def _unexpected(request: Request, exc: Exception):
+        # the details go to the log, never to the caller
+        log.exception("%s %s failed", request.method, request.url.path)
+        return JSONResponse(status_code=500, content=body("server_error", SERVER_ERROR))

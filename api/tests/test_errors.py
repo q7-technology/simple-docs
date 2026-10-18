@@ -68,3 +68,18 @@ def test_the_wrong_method_is_a_405_in_the_shape():
     assert r.status_code == 405
     assert r.json()["error"]["code"] == "method_not_allowed"
     assert "POST" in r.headers["allow"]
+
+
+def test_an_unexpected_failure_is_a_500_in_the_shape():
+    app = FastAPI()
+    errors.install(app)
+
+    @app.get("/boom")
+    def boom():
+        raise RuntimeError("the database said something private")
+
+    r = TestClient(app, raise_server_exceptions=False).get("/boom")
+    assert r.status_code == 500
+    assert r.json() == {"error": {"code": "server_error",
+                                  "message": "Something went wrong on our side. Try again, "
+                                             "and if it keeps happening tell an admin."}}

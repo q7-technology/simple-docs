@@ -21,6 +21,11 @@ SAME_SITE = {"X-Simple-Docs": "1"}
 def _ensure_database():
     admin_url = TEST_DATABASE_URL.rsplit("/", 1)[0] + "/postgres"
     name = TEST_DATABASE_URL.rsplit("/", 1)[1]
+    # the engine fixture drops the whole schema, so never point it at real data
+    assert name.endswith("_test"), (
+        f"TEST_DATABASE_URL names the database {name!r}; the tests wipe it, "
+        "so its name must end in _test"
+    )
     engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
     with engine.connect() as conn:
         exists = conn.execute(
@@ -77,7 +82,8 @@ def fresh_client():
 
 
 @pytest.fixture
-def client(engine):
+def client(db):
+    # through db, so whatever a request writes is truncated after the test too
     with fresh_client() as c:
         yield c
 

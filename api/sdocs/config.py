@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="DOCS_", extra="ignore")
 
-    database_url: str = "postgresql+psycopg://sdocs:sdocs@127.0.0.1:5432/sdocs"
+    database_url: str = "postgresql+psycopg://sdocs:sdocs-dev@127.0.0.1:5436/sdocs"
 
     # The only folder Simple Docs may read code from (step 4). In Compose the
     # host folder named in .env is mounted read-only here; run outside
