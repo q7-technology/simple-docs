@@ -474,6 +474,23 @@ The site deploys to Cloudflare Pages on push to `main`. Build and check
 locally; commit and push only with explicit approval. The GitHub repo
 `q7-technology/simple-docs` must exist before the page goes live.
 
+## Build steps
+
+Each step gets its own detailed plan (`docs/plans/<date>-step-N-<name>.md`)
+written just before it is built, and each ends usable end to end.
+
+| Step | Name | Usable at the end |
+|---|---|---|
+| 0 | Site page | `/projects/simple-docs` on the Q7 site, In development (in `q7-technology`). |
+| 1 | Skeleton | Compose (`db`, `api`, `caddy`), config, users and roles, sessions, first run, org settings, append-only trigger helper, CI. Desktop shell in the Q7 theme: sign in, first run, Users, Settings → Org. |
+| 2 | Documents by hand | Clients & projects, templates seeded from YAML (5 starters), documents and append-only versions, TipTap editor with `fixed`/`field` sections filled, version history and restore, edit lock, Markdown export. |
+| 3 | Writing with AI | Worker and `job` queue, OpenRouter client (ZDR, streaming, usage), model cache, budget and cap, redactor on notes and form values, outline → sections over SSE, section tools, `ai_run`, Spend screen, fake OpenRouter for tests. |
+| 4 | Repos | GitHub clone, local path under `DOCS_REPO_ROOT`, zip/folder upload, ignore list, deterministic analysis, file summaries cache, per-section selection, redaction report and "View what's sent". |
+| 5 | Review and print | Draft → In review → Approved, reviewer ≠ author, print preview, branded/plain PDF via WeasyPrint, Word via Pandoc, DRAFT watermark, docs pack. |
+| 6 | Visuals | Images (paste, drag, captions), Mermaid node and `diagram` sections, `table` sections, callouts; all through every export. |
+| 7 | Templates | Admin template editor, form builder, test run, publish, import/export YAML; all 25 starter templates. |
+| 8 | Outward links | GitHub pull requests (replace or merge), monkiro connector (import/sync clients and jobs). |
+
 ## Out of scope for v1
 
 SSO; real-time co-editing; inline review comments; write-back to local
