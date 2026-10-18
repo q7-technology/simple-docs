@@ -48,6 +48,8 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["sdocs"]
+# the api/alembic folder would otherwise make ruff count the alembic package as ours
+known-third-party = ["alembic"]
 
 [tool.ruff.lint.per-file-ignores]
 # a test reads best with its assertion on one line
