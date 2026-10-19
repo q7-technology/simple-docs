@@ -6,7 +6,7 @@ from sqlalchemy import text
 from sdocs.api import errors
 from sdocs.api.deps import DB
 from sdocs.api.guard import SameSiteOnly
-from sdocs.api.routes import auth, setup, users
+from sdocs.api.routes import auth, org, setup, users
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -30,6 +30,7 @@ def health(db: DB):
 
 
 v1.include_router(auth.router)
+v1.include_router(org.router)
 v1.include_router(setup.router)
 v1.include_router(users.router)
 app.include_router(v1)
