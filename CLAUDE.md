@@ -41,12 +41,34 @@ TMS, Simple LMS and Platen and works without any of them.
 ```
 CLAUDE.md            this file
 docs/plans/          design and implementation plans
-api/                 FastAPI app, alembic, tests
-apps/desktop/        the web app
-templates/           starter templates (YAML)
-export/              print.css, reference.docx, cover artwork
-docker-compose.yml
+api/                 FastAPI app (package and command sdocs), alembic, tests, uv.lock
+apps/desktop/        the web app (Vite, React, Tailwind from the Q7 tokens)
+deploy/Caddyfile     the way in: the app at /, the API at /api
+.github/workflows/   CI: API tests, lint and types; the app's lint, tests and build; Compose
+templates/           starter templates (YAML), from step 2
+export/              print.css, reference.docx, cover artwork, from step 5
+docker-compose.yml   db, api, caddy (the worker comes with step 3)
 ```
+
+## Conventions
+- Every API error is `{"error": {"code", "message", "fields"?}}`; messages are
+  written for people.
+- The session is an httpOnly, SameSite=Strict cookie (`sdocs_session`); a
+  request that changes something carries `X-Simple-Docs: 1`.
+- Roles and scopes live in `api/sdocs/services/sessions.py` (`SCOPES`): admin
+  `*`; editor documents, clients and `reviews:write`; reviewer reads and
+  `reviews:write` only. Nobody approves their own version.
+- Ports: database 5436, API 8044 (both 127.0.0.1), the app 8080
+  (`DOCS_HTTP_PORT`, 8380 on Q7's Mac), Vite 5178.
+- The command line never takes a password as an argument: `sdocs create-user`
+  and `sdocs set-password` prompt, or read one line with `--password-stdin`.
+- The API's image runs as `sdocs` (uid 10001) and installs what `api/uv.lock`
+  pins; add a dependency with `uv add` and commit the lock. CI installs with
+  `uv sync --locked --extra dev -p 3.12`.
+- `pytest`, `ruff` and `mypy` run from `api/` (the tests need the Compose `db`
+  and `POSTGRES_PASSWORD=sdocs-dev`, or `TEST_DATABASE_URL` ending in `_test`);
+  `npm test`, `npm run lint` and `npm run build` from `apps/desktop/`.
+- Australian English and sentence case in copy.
 
 ## Testing
 Tests never call the real OpenRouter; use the fake server. `make smoke` is the
