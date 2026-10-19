@@ -5,6 +5,7 @@ from sqlalchemy import text
 
 from sdocs.api import errors
 from sdocs.api.deps import DB
+from sdocs.api.routes import auth
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -26,4 +27,5 @@ def health(db: DB):
     return {"status": "ok"}
 
 
+v1.include_router(auth.router)
 app.include_router(v1)

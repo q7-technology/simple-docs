@@ -130,3 +130,31 @@ def editor(db):
 @pytest.fixture
 def reviewer(db):
     return make_user(db, "sam", "Sam Vu", "reviewer")
+
+
+def sign_in(client, username: str, password: str = PASSWORD) -> dict:
+    r = client.post("/v1/auth/sign-in", json={"username": username, "password": password})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def signed_in_client(user, password: str = PASSWORD):
+    """A client of its own with this person's session cookie."""
+    c = fresh_client()
+    sign_in(c, user.username, password)
+    return c
+
+
+@pytest.fixture
+def admin_client(admin):
+    return signed_in_client(admin)
+
+
+@pytest.fixture
+def editor_client(editor):
+    return signed_in_client(editor)
+
+
+@pytest.fixture
+def reviewer_client(reviewer):
+    return signed_in_client(reviewer)
