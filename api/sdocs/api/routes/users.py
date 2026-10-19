@@ -11,10 +11,10 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
 
 from sdocs.api.deps import DB, Principal, require
-from sdocs.api.errors import ApiError, commit_unique, invalid
+from sdocs.api.errors import ApiError, commit_unique, invalid, not_found
 from sdocs.api.schemas import Name, NewPassword, Role, Username
 from sdocs.models import AppUser
-from sdocs.services import access
+from sdocs.services import access, sessions
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -74,4 +74,47 @@ def add_user(body: UserIn, db: DB, who: Admin):
                    failed_attempts=0, created_by=who.user.id)
     db.add(user)
     commit_unique(db, {"uq_app_user_username": username_taken()})
+    return user_out(user)
+
+
+class UserPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    display_name: Name | None = None
+    role: Role | None = None
+    active: bool | None = None
+
+
+def no_such_user() -> ApiError:
+    return not_found("There's no user with that id.")
+
+
+@router.patch("/{user_id}", response_model=UserOut)
+def change_user(user_id: uuid.UUID, body: UserPatch, db: DB, who: Admin):
+    """Rename, change role, deactivate or bring back. Nobody deactivates
+    themselves, and the last active admin stays one."""
+    # every active admin's row is locked first, in one order, so two admins
+    # demoting each other at once can't leave nobody in charge
+    admins = db.execute(select(AppUser).where(AppUser.role == "admin", AppUser.active.is_(True))
+                        .order_by(AppUser.id).with_for_update()
+                        .execution_options(populate_existing=True)).scalars().all()
+    user = db.execute(select(AppUser).where(AppUser.id == user_id).with_for_update()
+                      .execution_options(populate_existing=True)).scalar_one_or_none()
+    if user is None:
+        raise no_such_user()
+    if body.active is False and user.id == who.user.id:
+        raise ApiError(409, "own_account", "You can't deactivate yourself. Ask another admin.")
+    stops_being_admin = user.role == "admin" and user.active and (
+        body.active is False or body.role not in (None, "admin"))
+    if stops_being_admin and len(admins) <= 1:
+        raise ApiError(409, "last_admin", "Simple Docs needs at least one active admin. "
+                                          "Make someone else an admin first.")
+    if body.display_name is not None:
+        user.display_name = body.display_name
+    if body.role is not None:
+        user.role = body.role
+    if body.active is not None and body.active != user.active:
+        user.active = body.active
+        if not body.active:
+            sessions.end_all(db, user)
+    db.commit()
     return user_out(user)
