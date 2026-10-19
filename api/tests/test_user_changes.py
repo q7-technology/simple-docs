@@ -2,7 +2,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from conftest import fresh_client, make_user, sign_in, signed_in_client
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from sdocs.models import AppUser
@@ -58,11 +58,34 @@ def test_with_another_admin_one_can_step_down(admin_client, db, admin):
     assert _patch(admin_client, admin, role="editor").json()["role"] == "editor"
 
 
-def _waiting_on_a_lock(engine) -> int:
+def _blocked_by(engine, pid: int) -> int:
+    """How many backends wait, directly or behind another waiter, on a lock
+    the backend `pid` holds (the second waiter on a row queues behind the
+    first)."""
     # a connection of its own: pg_stat_activity is read once per transaction
     with engine.connect() as conn:
-        return conn.execute(text("select count(*) from pg_stat_activity where datname = "
-                           "current_database() and wait_event_type = 'Lock'")).scalar_one()
+        return conn.execute(text(
+            "with recursive blocked(pid) as ("
+            " select pid from pg_stat_activity where :pid = any(pg_blocking_pids(pid))"
+            " union select a.pid from pg_stat_activity a"
+            " join blocked b on b.pid = any(pg_blocking_pids(a.pid)))"
+            " select count(*) from blocked"), {"pid": pid}).scalar_one()
+
+
+def _wait_until_blocked(engine, pid: int, n: int) -> int:
+    seen = 0
+    for _ in range(200):
+        seen = _blocked_by(engine, pid)
+        if seen >= n:
+            break
+        time.sleep(0.05)
+    return seen
+
+
+def _hold_the_admins(holder) -> int:
+    """Lock every admin row in `holder`; its backend's pid."""
+    holder.execute(select(AppUser).where(AppUser.role == "admin").with_for_update())
+    return holder.execute(text("select pg_backend_pid()")).scalar_one()
 
 
 def test_two_admins_demoting_each_other_at_once_leave_one(db, engine, admin):
@@ -71,21 +94,32 @@ def test_two_admins_demoting_each_other_at_once_leave_one(db, engine, admin):
     with ThreadPoolExecutor(max_workers=2) as pool, Session(engine) as holder:
         # both requests get past their checks of who is asking, then wait here
         # with neither having changed anything yet
-        holder.execute(select(AppUser).where(AppUser.role == "admin").with_for_update())
+        pid = _hold_the_admins(holder)
         calls = [pool.submit(lambda: _patch(mine, ada, role="editor").status_code),
                  pool.submit(lambda: _patch(hers, admin, role="editor").status_code)]
-        for _ in range(100):
-            if _waiting_on_a_lock(engine) >= 2:
-                break
-            time.sleep(0.05)
-        assert _waiting_on_a_lock(engine) >= 2
+        assert _wait_until_blocked(engine, pid, 2) == 2
         holder.rollback()
-        codes = sorted(f.result() for f in calls)
-    # the loser is refused as the last admin
-    assert codes == [200, 409]
+        codes = sorted(f.result(timeout=10) for f in calls)
+    # the winner demoted the loser, who is refused as no longer an admin
+    assert codes == [200, 403]
     admins = db.execute(select(func.count()).select_from(AppUser)
                         .where(AppUser.role == "admin", AppUser.active.is_(True))).scalar()
     assert admins == 1
+
+
+def test_an_admin_demoted_while_their_change_waits_is_refused(db, engine, admin, editor):
+    ada = make_user(db, "ada", "Ada Ng", "admin")
+    hers = signed_in_client(ada)
+    with ThreadPoolExecutor(max_workers=1) as pool, Session(engine) as holder:
+        pid = _hold_the_admins(holder)
+        call = pool.submit(lambda: _patch(hers, editor, role="admin"))
+        assert _wait_until_blocked(engine, pid, 1) == 1
+        # demoted by someone else after her session was checked
+        holder.execute(update(AppUser).where(AppUser.id == ada.id).values(role="editor"))
+        holder.commit()
+        r = call.result(timeout=10)
+    assert r.status_code == 403 and r.json()["error"]["code"] == "forbidden"
+    assert db.execute(select(AppUser.role).where(AppUser.id == editor.id)).scalar_one() == "editor"
 
 
 def test_people_are_never_deleted(admin_client, db, editor):

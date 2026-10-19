@@ -129,10 +129,26 @@ class OwnPasswordIn(BaseModel):
 @router.post("/password", status_code=204)
 def change_own_password(body: OwnPasswordIn, db: DB, who: Who):
     """Your own password, with the current one. Your other sessions end; this
-    one carries on."""
-    if not access.verify_password(body.current_password, who.user.password_hash):
+    one carries on. Wrong current passwords count toward the same lock as
+    signing in, so a session left open can't be used to guess it."""
+    user = db.execute(select(AppUser).where(AppUser.id == who.user.id).with_for_update()
+                      .execution_options(populate_existing=True)).scalar_one()
+    now = datetime.now(UTC)
+    if user.locked_until is not None and user.locked_until > now:
+        raise locked()
+    if not access.verify_password(body.current_password, user.password_hash):
+        user.failed_attempts += 1
+        if user.failed_attempts >= TRIES:
+            user.failed_attempts = 0
+            user.locked_until = now + LOCK
+            log.info("password locked for %s", user.username)
+        db.commit()
         raise invalid("current_password", "That isn't your current password.")
-    who.user.password_hash = access.hash_password(body.new_password)
-    sessions.end_all(db, who.user, keep=who.session)
+    if body.new_password == body.current_password:
+        raise invalid("new_password", "Choose a password you aren't using now.")
+    user.password_hash = access.hash_password(body.new_password)
+    user.failed_attempts = 0
+    user.locked_until = None
+    sessions.end_all(db, user, keep=who.session)
     db.commit()
     return Response(status_code=204)

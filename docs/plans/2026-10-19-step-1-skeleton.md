@@ -2677,9 +2677,9 @@ def beaten_to_it(engine):
 
 `api/tests/test_users.py`:
 ```python
+from conftest import fresh_client, make_user, sign_in
 from sqlalchemy import select
 
-from conftest import fresh_client, make_user, sign_in
 from sdocs.models import AppUser
 
 KIM = {"username": "Kim", "display_name": "Kim Lee", "role": "reviewer",
@@ -2861,9 +2861,13 @@ git commit -m "Let an admin list the people who sign in and add someone" \
 
 `api/tests/test_user_changes.py`:
 ```python
-from sqlalchemy import func, select
+import time
+from concurrent.futures import ThreadPoolExecutor
 
-from conftest import all_at_once, fresh_client, make_user, sign_in, signed_in_client
+from conftest import fresh_client, make_user, sign_in, signed_in_client
+from sqlalchemy import func, select, text, update
+from sqlalchemy.orm import Session
+
 from sdocs.models import AppUser
 
 LAST = {"error": {"code": "last_admin", "message":
@@ -2917,18 +2921,68 @@ def test_with_another_admin_one_can_step_down(admin_client, db, admin):
     assert _patch(admin_client, admin, role="editor").json()["role"] == "editor"
 
 
-def test_two_admins_demoting_each_other_at_once_leave_one(db, admin):
+def _blocked_by(engine, pid: int) -> int:
+    """How many backends wait, directly or behind another waiter, on a lock
+    the backend `pid` holds (the second waiter on a row queues behind the
+    first)."""
+    # a connection of its own: pg_stat_activity is read once per transaction
+    with engine.connect() as conn:
+        return conn.execute(text(
+            "with recursive blocked(pid) as ("
+            " select pid from pg_stat_activity where :pid = any(pg_blocking_pids(pid))"
+            " union select a.pid from pg_stat_activity a"
+            " join blocked b on b.pid = any(pg_blocking_pids(a.pid)))"
+            " select count(*) from blocked"), {"pid": pid}).scalar_one()
+
+
+def _wait_until_blocked(engine, pid: int, n: int) -> int:
+    seen = 0
+    for _ in range(200):
+        seen = _blocked_by(engine, pid)
+        if seen >= n:
+            break
+        time.sleep(0.05)
+    return seen
+
+
+def _hold_the_admins(holder) -> int:
+    """Lock every admin row in `holder`; its backend's pid."""
+    holder.execute(select(AppUser).where(AppUser.role == "admin").with_for_update())
+    return holder.execute(text("select pg_backend_pid()")).scalar_one()
+
+
+def test_two_admins_demoting_each_other_at_once_leave_one(db, engine, admin):
     ada = make_user(db, "ada", "Ada Ng", "admin")
     mine, hers = signed_in_client(admin), signed_in_client(ada)
-    turns = iter([lambda: _patch(mine, ada, role="editor").status_code,
-                  lambda: _patch(hers, admin, role="editor").status_code])
-    codes = sorted(all_at_once(2, lambda: next(turns)()))
-    # the loser is refused as the last admin, or, if the winner got in before
-    # its session was checked, as no longer an admin
-    assert codes[0] == 200 and codes[1] in (403, 409)
+    with ThreadPoolExecutor(max_workers=2) as pool, Session(engine) as holder:
+        # both requests get past their checks of who is asking, then wait here
+        # with neither having changed anything yet
+        pid = _hold_the_admins(holder)
+        calls = [pool.submit(lambda: _patch(mine, ada, role="editor").status_code),
+                 pool.submit(lambda: _patch(hers, admin, role="editor").status_code)]
+        assert _wait_until_blocked(engine, pid, 2) == 2
+        holder.rollback()
+        codes = sorted(f.result(timeout=10) for f in calls)
+    # the winner demoted the loser, who is refused as no longer an admin
+    assert codes == [200, 403]
     admins = db.execute(select(func.count()).select_from(AppUser)
                         .where(AppUser.role == "admin", AppUser.active.is_(True))).scalar()
     assert admins == 1
+
+
+def test_an_admin_demoted_while_their_change_waits_is_refused(db, engine, admin, editor):
+    ada = make_user(db, "ada", "Ada Ng", "admin")
+    hers = signed_in_client(ada)
+    with ThreadPoolExecutor(max_workers=1) as pool, Session(engine) as holder:
+        pid = _hold_the_admins(holder)
+        call = pool.submit(lambda: _patch(hers, editor, role="admin"))
+        assert _wait_until_blocked(engine, pid, 1) == 1
+        # demoted by someone else after her session was checked
+        holder.execute(update(AppUser).where(AppUser.id == ada.id).values(role="editor"))
+        holder.commit()
+        r = call.result(timeout=10)
+    assert r.status_code == 403 and r.json()["error"]["code"] == "forbidden"
+    assert db.execute(select(AppUser.role).where(AppUser.id == editor.id)).scalar_one() == "editor"
 
 
 def test_people_are_never_deleted(admin_client, db, editor):
@@ -2950,13 +3004,15 @@ def test_only_an_admin_changes_anyone(editor_client, reviewer):
 **Step 2: Run it to see it fail**
 
 Run: `cd api && .venv/bin/pytest tests/test_user_changes.py -v`
-Expected: FAIL, PATCH answers `405` (`assert 405 == 200`); `test_people_are_never_deleted` and `test_only_an_admin_changes_anyone` may pass already.
+Expected: FAIL, `/v1/users/{id}` answers 404 (`assert 404 == 200`, `assert 404 == 405`, `assert 404 == 403`): no route has that path yet.
 
 **Step 3: Write the implementation**
 
-In `api/sdocs/api/routes/users.py`, add `not_found` to the errors import, `sessions` to the services import:
+In `api/sdocs/api/routes/users.py`, add `forbidden` and `not_found` to the errors import, `sessions` to the services import, and SQLAlchemy's `Session`:
 ```python
-from sdocs.api.errors import ApiError, commit_unique, invalid, not_found
+from sqlalchemy.orm import Session as Db
+
+from sdocs.api.errors import ApiError, commit_unique, forbidden, invalid, not_found
 from sdocs.services import access, sessions
 ```
 and append:
@@ -2974,15 +3030,27 @@ def no_such_user() -> ApiError:
     return not_found("There's no user with that id.")
 
 
+def lock_admins(db: Db, who: Principal) -> list[AppUser]:
+    """Every active admin's row, locked in id order, and the caller still one
+    of them. Any code that locks more than one app_user row locks these first,
+    in this order, so two requests never wait on each other's rows."""
+    admins = list(db.execute(select(AppUser)
+                             .where(AppUser.role == "admin", AppUser.active.is_(True))
+                             .order_by(AppUser.id).with_for_update()
+                             .execution_options(populate_existing=True)).scalars())
+    # demoted or deactivated after this request's session was checked
+    if who.user.id not in {a.id for a in admins}:
+        raise forbidden()
+    return admins
+
+
 @router.patch("/{user_id}", response_model=UserOut)
 def change_user(user_id: uuid.UUID, body: UserPatch, db: DB, who: Admin):
     """Rename, change role, deactivate or bring back. Nobody deactivates
     themselves, and the last active admin stays one."""
     # every active admin's row is locked first, in one order, so two admins
     # demoting each other at once can't leave nobody in charge
-    admins = db.execute(select(AppUser).where(AppUser.role == "admin", AppUser.active.is_(True))
-                        .order_by(AppUser.id).with_for_update()
-                        .execution_options(populate_existing=True)).scalars().all()
+    admins = lock_admins(db, who)
     user = db.execute(select(AppUser).where(AppUser.id == user_id).with_for_update()
                       .execution_options(populate_existing=True)).scalar_one_or_none()
     if user is None:
@@ -3009,7 +3077,7 @@ def change_user(user_id: uuid.UUID, body: UserPatch, db: DB, who: Admin):
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_user_changes.py tests/test_users.py -v`
-Expected: `17 passed`.
+Expected: `18 passed`.
 
 **Step 5: Commit**
 
@@ -3093,6 +3161,38 @@ def test_a_wrong_current_password_changes_nothing(editor_client):
 def test_changing_your_own_needs_a_session(client):
     r = client.post("/v1/auth/password", json={"current_password": PASSWORD, "new_password": NEW})
     assert r.status_code == 401
+
+
+def test_wrong_current_passwords_lock_it_but_this_session_carries_on(editor_client):
+    for _ in range(5):
+        r = editor_client.post("/v1/auth/password",
+                               json={"current_password": "nope", "new_password": NEW})
+        assert r.status_code == 422
+    r = editor_client.post("/v1/auth/password",
+                           json={"current_password": PASSWORD, "new_password": NEW})
+    assert r.status_code == 401 and r.json()["error"]["code"] == "locked"
+    r = fresh_client().post("/v1/auth/sign-in", json={"username": "mel", "password": PASSWORD})
+    assert r.status_code == 401 and r.json()["error"]["code"] == "locked"
+    assert editor_client.get("/v1/auth/me").status_code == 200
+
+
+def test_changing_your_own_clears_wrong_tries_and_an_old_lock(editor_client, db, editor):
+    editor.failed_attempts = 4
+    editor.locked_until = datetime.now(UTC) - timedelta(minutes=1)
+    db.commit()
+    r = editor_client.post("/v1/auth/password",
+                           json={"current_password": PASSWORD, "new_password": NEW})
+    assert r.status_code == 204
+    db.refresh(editor)
+    assert editor.failed_attempts == 0 and editor.locked_until is None
+
+
+def test_a_new_password_is_not_the_current_one(editor_client):
+    r = editor_client.post("/v1/auth/password",
+                           json={"current_password": PASSWORD, "new_password": PASSWORD})
+    assert r.status_code == 422
+    assert r.json()["error"]["fields"] == {
+        "new_password": "Choose a password you aren't using now."}
 ```
 
 **Step 2: Run it to see it fail**
@@ -3115,8 +3215,9 @@ class PasswordIn(BaseModel):
 def set_password(user_id: uuid.UUID, body: PasswordIn, db: DB, who: Admin):
     """A new password from an admin: it clears a lock and signs them out
     everywhere (but this session, if it is your own)."""
-    user = db.execute(select(AppUser).where(AppUser.id == user_id)
-                      .with_for_update()).scalar_one_or_none()
+    lock_admins(db, who)
+    user = db.execute(select(AppUser).where(AppUser.id == user_id).with_for_update()
+                      .execution_options(populate_existing=True)).scalar_one_or_none()
     if user is None:
         raise no_such_user()
     user.password_hash = access.hash_password(body.password)
@@ -3145,11 +3246,27 @@ class OwnPasswordIn(BaseModel):
 @router.post("/password", status_code=204)
 def change_own_password(body: OwnPasswordIn, db: DB, who: Who):
     """Your own password, with the current one. Your other sessions end; this
-    one carries on."""
-    if not access.verify_password(body.current_password, who.user.password_hash):
+    one carries on. Wrong current passwords count toward the same lock as
+    signing in, so a session left open can't be used to guess it."""
+    user = db.execute(select(AppUser).where(AppUser.id == who.user.id).with_for_update()
+                      .execution_options(populate_existing=True)).scalar_one()
+    now = datetime.now(UTC)
+    if user.locked_until is not None and user.locked_until > now:
+        raise locked()
+    if not access.verify_password(body.current_password, user.password_hash):
+        user.failed_attempts += 1
+        if user.failed_attempts >= TRIES:
+            user.failed_attempts = 0
+            user.locked_until = now + LOCK
+            log.info("password locked for %s", user.username)
+        db.commit()
         raise invalid("current_password", "That isn't your current password.")
-    who.user.password_hash = access.hash_password(body.new_password)
-    sessions.end_all(db, who.user, keep=who.session)
+    if body.new_password == body.current_password:
+        raise invalid("new_password", "Choose a password you aren't using now.")
+    user.password_hash = access.hash_password(body.new_password)
+    user.failed_attempts = 0
+    user.locked_until = None
+    sessions.end_all(db, user, keep=who.session)
     db.commit()
     return Response(status_code=204)
 ```
@@ -3157,7 +3274,7 @@ def change_own_password(body: OwnPasswordIn, db: DB, who: Who):
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_passwords.py -v`
-Expected: `7 passed`.
+Expected: `10 passed`.
 
 **Step 5: Commit**
 

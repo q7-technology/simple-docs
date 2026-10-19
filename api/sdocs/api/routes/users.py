@@ -9,9 +9,10 @@ from typing import Annotated
 from fastapi import APIRouter, Response
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session as Db
 
 from sdocs.api.deps import DB, Principal, require
-from sdocs.api.errors import ApiError, commit_unique, invalid, not_found
+from sdocs.api.errors import ApiError, commit_unique, forbidden, invalid, not_found
 from sdocs.api.schemas import Name, NewPassword, Role, Username
 from sdocs.models import AppUser
 from sdocs.services import access, sessions
@@ -88,15 +89,27 @@ def no_such_user() -> ApiError:
     return not_found("There's no user with that id.")
 
 
+def lock_admins(db: Db, who: Principal) -> list[AppUser]:
+    """Every active admin's row, locked in id order, and the caller still one
+    of them. Any code that locks more than one app_user row locks these first,
+    in this order, so two requests never wait on each other's rows."""
+    admins = list(db.execute(select(AppUser)
+                             .where(AppUser.role == "admin", AppUser.active.is_(True))
+                             .order_by(AppUser.id).with_for_update()
+                             .execution_options(populate_existing=True)).scalars())
+    # demoted or deactivated after this request's session was checked
+    if who.user.id not in {a.id for a in admins}:
+        raise forbidden()
+    return admins
+
+
 @router.patch("/{user_id}", response_model=UserOut)
 def change_user(user_id: uuid.UUID, body: UserPatch, db: DB, who: Admin):
     """Rename, change role, deactivate or bring back. Nobody deactivates
     themselves, and the last active admin stays one."""
     # every active admin's row is locked first, in one order, so two admins
     # demoting each other at once can't leave nobody in charge
-    admins = db.execute(select(AppUser).where(AppUser.role == "admin", AppUser.active.is_(True))
-                        .order_by(AppUser.id).with_for_update()
-                        .execution_options(populate_existing=True)).scalars().all()
+    admins = lock_admins(db, who)
     user = db.execute(select(AppUser).where(AppUser.id == user_id).with_for_update()
                       .execution_options(populate_existing=True)).scalar_one_or_none()
     if user is None:
@@ -129,8 +142,9 @@ class PasswordIn(BaseModel):
 def set_password(user_id: uuid.UUID, body: PasswordIn, db: DB, who: Admin):
     """A new password from an admin: it clears a lock and signs them out
     everywhere (but this session, if it is your own)."""
-    user = db.execute(select(AppUser).where(AppUser.id == user_id)
-                      .with_for_update()).scalar_one_or_none()
+    lock_admins(db, who)
+    user = db.execute(select(AppUser).where(AppUser.id == user_id).with_for_update()
+                      .execution_options(populate_existing=True)).scalar_one_or_none()
     if user is None:
         raise no_such_user()
     user.password_hash = access.hash_password(body.password)
