@@ -125,3 +125,17 @@ def test_a_deactivated_persons_session_stops_working(client, db, editor):
     db.execute(update(AppUser).values(active=False))
     db.commit()
     assert client.get("/v1/auth/me").status_code == 401
+
+
+def test_a_scope_is_held_exactly_by_its_area_or_by_everything():
+    from sdocs.api.deps import Principal
+
+    def holds(scopes: list[str], scope: str) -> bool:
+        return Principal(user=None, session=None, scopes=scopes).has_scope(scope)  # type: ignore[arg-type]
+
+    assert holds(["*"], "users:write")
+    assert holds(["documents:*"], "documents:write")
+    assert holds(["documents:read"], "documents:read")
+    assert not holds(["documents:read"], "documents:write")
+    assert not holds(["documents:*"], "clients:read")
+    assert not holds([], "documents:read")
