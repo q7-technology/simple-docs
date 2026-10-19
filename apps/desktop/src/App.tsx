@@ -2,9 +2,11 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "./auth/AuthContext";
 import { RequireAuth, RequireScope } from "./auth/guards";
 import { Account } from "./pages/Account";
+import { SettingsLayout } from "./pages/Settings";
 import { SetUp } from "./pages/SetUp";
 import { SignIn } from "./pages/SignIn";
 import { SOON, Soon } from "./pages/Soon";
+import { Users } from "./pages/Users";
 import { Layout } from "./ui/Layout";
 import { StarField } from "./ui/StarField";
 
@@ -24,6 +26,12 @@ export function AppRoutes() {
           </Route>
           <Route element={<RequireScope scope="spend:read" />}>
             <Route path="/spend" element={<Soon {...SOON.spend} />} />
+          </Route>
+          <Route element={<RequireScope scope="settings:write" />}>
+            <Route path="/settings" element={<SettingsLayout />}>
+              <Route index element={<Navigate to="/settings/users" replace />} />
+              <Route path="users" element={<Users />} />
+            </Route>
           </Route>
         </Route>
       </Route>

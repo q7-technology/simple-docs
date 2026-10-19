@@ -59,7 +59,8 @@ export function stubApi(more: Handler = () => null,
 
 function Where() {
   const { pathname } = useLocation();
-  return <output data-testid="where">{pathname}</output>;
+  // a div, not an output: an output is a status, and the pages under test have their own
+  return <div data-testid="where">{pathname}</div>;
 }
 
 export function renderApp(path: string) {
