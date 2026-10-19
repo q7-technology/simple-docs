@@ -18,5 +18,40 @@ services:
       timeout: 3s
       retries: 20
 
+  api:
+    build: ./api
+    restart: unless-stopped
+    # migrations run on every start, before the API takes requests
+    command: sh -c "alembic upgrade head && uvicorn sdocs.api.app:app --host 0.0.0.0 --port 8000"
+    environment:
+      DOCS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-sdocs}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-sdocs}
+      DOCS_COOKIE_SECURE: ${DOCS_COOKIE_SECURE:-false}
+      # Read from step 3 on; they stay on the server, never sent to the browser
+      DOCS_OPENROUTER_API_KEY: ${DOCS_OPENROUTER_API_KEY:-}
+      DOCS_GITHUB_TOKEN: ${DOCS_GITHUB_TOKEN:-}
+      DOCS_MONKIRO_API_KEY: ${DOCS_MONKIRO_API_KEY:-}
+      # Step 4 mounts ${DOCS_REPO_ROOT} read-only at /repos, here and in the
+      # worker, and sets DOCS_REPO_ROOT=/repos.
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - "8000"
+    # Caddy is the way in. Published on the host as well, on 127.0.0.1 only,
+    # for the desktop's dev server, scripts and CI.
+    ports:
+      - "127.0.0.1:${DOCS_API_PORT:-8044}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/v1/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # worker: arrives with step 3, when there is a job queue to drain
+  # (generation, exports, repo analysis, monkiro sync, pull requests). Same
+  # image and DOCS_ settings as api, command `python -m sdocs.worker`, and
+  # DOCS_REPO_ROOT mounted read-only like api from step 4.
+
 volumes:
   pgdata:
