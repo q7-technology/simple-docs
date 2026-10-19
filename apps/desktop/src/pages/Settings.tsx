@@ -2,7 +2,10 @@ import { NavLink, Outlet } from "react-router-dom";
 import { SectionHeading } from "../ui/SectionHeading";
 import { navLink } from "../ui/Layout";
 
-const TABS = [{ to: "/settings/users", label: "Users" }];
+const TABS = [
+  { to: "/settings/users", label: "Users" },
+  { to: "/settings/org", label: "Organisation" },
+];
 
 /** Settings, for admins: who signs in, and the organisation. Later steps add
  * models, budget and caps, ignore and redaction patterns, and connectors. */

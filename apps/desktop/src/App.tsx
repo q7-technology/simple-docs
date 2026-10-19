@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "./auth/AuthContext";
 import { RequireAuth, RequireScope } from "./auth/guards";
 import { Account } from "./pages/Account";
+import { OrgSettings } from "./pages/OrgSettings";
 import { SettingsLayout } from "./pages/Settings";
 import { SetUp } from "./pages/SetUp";
 import { SignIn } from "./pages/SignIn";
@@ -31,6 +32,7 @@ export function AppRoutes() {
             <Route path="/settings" element={<SettingsLayout />}>
               <Route index element={<Navigate to="/settings/users" replace />} />
               <Route path="users" element={<Users />} />
+              <Route path="org" element={<OrgSettings />} />
             </Route>
           </Route>
         </Route>
