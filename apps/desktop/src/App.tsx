@@ -1,18 +1,11 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "./auth/AuthContext";
-import { RequireAuth } from "./auth/guards";
+import { RequireAuth, RequireScope } from "./auth/guards";
 import { SetUp } from "./pages/SetUp";
 import { SignIn } from "./pages/SignIn";
+import { SOON, Soon } from "./pages/Soon";
+import { Layout } from "./ui/Layout";
 import { StarField } from "./ui/StarField";
-
-/** Until the shell (Task 22). */
-function SignedIn() {
-  return (
-    <main id="main" className="relative z-10 p-8">
-      <h1 className="text-section-title-sm">Signed in</h1>
-    </main>
-  );
-}
 
 export function AppRoutes() {
   return (
@@ -20,7 +13,17 @@ export function AppRoutes() {
       <Route path="/sign-in" element={<SignIn />} />
       <Route path="/setup" element={<SetUp />} />
       <Route element={<RequireAuth />}>
-        <Route index element={<SignedIn />} />
+        <Route element={<Layout />}>
+          <Route index element={<Navigate to="/documents" replace />} />
+          <Route path="/documents" element={<Soon {...SOON.documents} />} />
+          <Route path="/clients" element={<Soon {...SOON.clients} />} />
+          <Route element={<RequireScope scope="templates:write" />}>
+            <Route path="/templates" element={<Soon {...SOON.templates} />} />
+          </Route>
+          <Route element={<RequireScope scope="spend:read" />}>
+            <Route path="/spend" element={<Soon {...SOON.spend} />} />
+          </Route>
+        </Route>
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
