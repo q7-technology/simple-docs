@@ -35,6 +35,15 @@ describe("the Q7 components", () => {
     expect(input).toHaveAccessibleDescription("Lower case is fine. That username is taken.");
   });
 
+  it("keeps the field's wiring over anything passed in, and a visible edge", () => {
+    render(<TextField label="Email" id="mine" aria-describedby="other" hint="Work email." />);
+    const input = screen.getByLabelText("Email");
+    expect(input.id).not.toBe("mine");
+    expect(input).toHaveAccessibleDescription("Work email.");
+    expect(input).toHaveClass("border-space-gray/70");
+    expect(input).not.toHaveClass("border-input");
+  });
+
   it("leaves a field without an error unmarked", () => {
     render(<TextField label="Phone" />);
     expect(screen.getByLabelText("Phone")).not.toHaveAttribute("aria-invalid");

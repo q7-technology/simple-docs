@@ -80,6 +80,24 @@ describe("ApiClient", () => {
     await expect(client.get("/v1/health")).rejects.toBeInstanceOf(Unreachable);
     answers.push(new Response("<html>Bad gateway</html>", { status: 502 }));
     await expect(client.get("/v1/health")).rejects.toThrow("Can't reach Simple Docs right now.");
+    for (const status of [503, 504]) {
+      answers.push(new Response("<html>down</html>", { status }));
+      await expect(client.get("/v1/health")).rejects.toBeInstanceOf(Unreachable);
+    }
+  });
+
+  it("says what answered when something other than the API's JSON came back", async () => {
+    answers.push(new Response("<html>Not found</html>", { status: 404 }));
+    const e = (await client.get("/v1/nowhere").catch((x) => x)) as ApiError;
+    expect(e).toBeInstanceOf(ApiError);
+    expect([e.status, e.code, e.message]).toEqual([404, "unexpected", "Simple Docs answered 404. Try again."]);
+    answers.push(new Response("oops", { status: 500 }));
+    await expect(client.get("/v1/health")).rejects.toMatchObject({ status: 500, code: "unexpected" });
+  });
+
+  it("names its errors", () => {
+    expect(new ApiError(400, "x", "y").name).toBe("ApiError");
+    expect(new Unreachable().name).toBe("Unreachable");
   });
 
   it("puts any trouble into words", () => {

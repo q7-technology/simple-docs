@@ -15,10 +15,11 @@ export default defineConfig({
     port: 5178,
     strictPort: true,
     proxy: {
-      "/api": {
+      "/api/": {
+        // Another API port? Export DOCS_API_URL before npm run dev.
         target: process.env.DOCS_API_URL ?? "http://127.0.0.1:8044",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ""),
+        rewrite: (path) => path.replace(/^\/api(?=\/)/, ""),
       },
     },
   },

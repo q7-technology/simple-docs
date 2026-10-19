@@ -7,6 +7,7 @@
 export const BASE = "/api";
 
 export class ApiError extends Error {
+  override name = "ApiError";
   readonly status: number;
   /** For programs: wrong_password, locked, last_admin, ... */
   readonly code: string;
@@ -21,8 +22,9 @@ export class ApiError extends Error {
   }
 }
 
-/** The API could not be reached, or what answered wasn't the API. */
+/** The API could not be reached, or a gateway answered for it. */
 export class Unreachable extends Error {
+  override name = "Unreachable";
   constructor() {
     super("Can't reach Simple Docs right now. Check it's running, then try again.");
   }
@@ -33,6 +35,9 @@ export class Unreachable extends Error {
 export function messageOf(e: unknown): string {
   return e instanceof ApiError || e instanceof Unreachable ? e.message : "Something went wrong. Try again.";
 }
+
+/** What a proxy answers when the API behind it is down or slow. */
+const GATEWAY = new Set([502, 503, 504]);
 
 type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -72,8 +77,10 @@ export class ApiClient {
       const text = await res.text();
       parsed = text ? JSON.parse(text) : null;
     } catch {
-      // a proxy's error page, say: not the API's own answer
-      throw new Unreachable();
+      // Not the API's own answer. A gateway's error page means the API is
+      // down; anything else is said with its status.
+      if (GATEWAY.has(res.status)) throw new Unreachable();
+      throw new ApiError(res.status, "unexpected", `Simple Docs answered ${res.status}. Try again.`);
     }
     if (res.ok) return parsed as T;
     const error = (parsed as ErrorBody | null)?.error;

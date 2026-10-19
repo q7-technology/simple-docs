@@ -31,7 +31,7 @@ The design is settled; this plan does not change any of its decisions. Patterns 
 
 ### The Q7 design system in the app
 
-- `tokens.json` is copied into `apps/desktop/src/design/tokens.json`; `src/design/theme.ts` turns it into the Tailwind theme (`tailwind.config.ts`, loaded with `@config`). Colours keep their token names (`bg-space-darkBlue`, `text-space-lightGray`, `border-space-blue/20`), type styles are sizes by role (`text-section-title-sm`, `text-card-title`, `text-label`, `text-body-sm`, `text-caption`, `text-eyebrow`), radii and shadows keep theirs (`rounded-lg`, `shadow-glow-blue`), and layout widths are `max-w-shell`, `max-w-panel`, `max-w-prose`.
+- `tokens.json` is copied into `apps/desktop/src/design/tokens.json`; `src/design/theme.ts` turns it into the Tailwind theme (`tailwind.config.ts`, loaded with `@config`). Colours keep their token names (`bg-space-darkBlue`, `text-space-lightGray`, `border-space-blue/20`), type styles are sizes by role (`text-section-title-sm`, `text-card-title`, `text-label`, `text-body-sm`, `text-caption`, `text-eyebrow`), radii and shadows keep theirs (`rounded-lg`, `shadow-glow-blue`), and layout widths are `max-w-shell`, `max-w-panel`, `max-w-measure` (the token `prose-max`, renamed because Tailwind's own `max-w-prose` is 65ch and would win).
 - One dark theme, no `dark:` variants. `body` is `space-darkBlue`; cards are `space-darkBlue/60` with a `space-blue/20` border and a backdrop blur over a static star field. Headings and values are `space-lightGray`, prose and meta `space-gray`.
 - Primary buttons are `bg-space-blue text-space-darkBlue` (the AA fix; white on `space-blue` is 2.6:1). Gold marks warnings only (this design: DRAFT, warnings, test runs).
 - lucide-react icons at 1.5px (one CSS rule on `svg.lucide`), decorative ones `aria-hidden`. The focus ring is 2px `ring` with a 2px offset and is never removed. The shell's first focusable element is a skip link. Under `prefers-reduced-motion` every animation and transition collapses to its last frame.
@@ -65,6 +65,7 @@ Simple WMS has `127.0.0.1:5433` (database) and `8011` (API) in its `.env`; Simpl
 - **Lint and types in CI from the start:** ruff and mypy for the API, ESLint and `tsc` (through `npm run build`) for the desktop, beside the tests. Playwright arrives with the first end-to-end flow worth driving (the design's sign in → handover → approved PDF).
 - **The command line never takes a password as an argument**, where it would sit in shell history and `ps`: `sdocs create-user` and `sdocs set-password` ask twice without echo, or read one line with `--password-stdin` (only the line ending stripped, spaces kept). `set-password` asks before it locks the person's row, never while holding it.
 - **The API's image runs as `sdocs` (uid 10001), never root**, on `python:3.12-slim-bookworm`, and installs exactly what `api/uv.lock` pins (committed; `uv export --frozen` with a pinned `uv` image, then `pip install --no-deps .` for the code). CI installs from the same lock with `uv sync --locked`. Notes for later steps: a named volume the API writes to needs its directory made and `chown`ed in the image before `USER sdocs`, or Docker creates it owned by root; when `git` is installed (step 4) add `git config --system --add safe.directory '*'`, since the mounted repos belong to someone else; step 4's repo mount is `${DOCS_REPO_ROOT:?set DOCS_REPO_ROOT in .env}:/repos:ro`.
+- **`npm audit` shows dev-only advisories through vitest 3** (tinypool, `@vitest/mocker`). Nothing in the built app carries them, so they are accepted for step 1; upgrade vitest in a later step. CI doesn't run `npm audit`.
 - **No worker in Compose yet.** Nothing queues until step 3; Compose has a comment where it goes. `DOCS_REPO_ROOT` is in the settings and `.env.example` now and is mounted from step 4, when something reads it.
 
 ---
@@ -4396,10 +4397,11 @@ export default defineConfig({
     port: 5178,
     strictPort: true,
     proxy: {
-      "/api": {
+      "/api/": {
+        // Another API port? Export DOCS_API_URL before npm run dev.
         target: process.env.DOCS_API_URL ?? "http://127.0.0.1:8044",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ""),
+        rewrite: (path) => path.replace(/^\/api(?=\/)/, ""),
       },
     },
   },
@@ -4527,8 +4529,13 @@ describe("the Q7 tokens as a Tailwind theme", () => {
   it("names radii, shadows and widths as the tokens do", () => {
     expect(theme.borderRadius).toMatchObject({ md: "6px", lg: "8px", xl: "12px", full: "9999px" });
     expect(theme.boxShadow["glow-blue"]).toBe("0 0 24px rgba(41, 171, 226, 0.3)");
-    expect(theme.maxWidth).toMatchObject({ shell: "1280px", panel: "896px", prose: "768px" });
+    expect(theme.maxWidth).toMatchObject({ shell: "1280px", panel: "896px", measure: "768px" });
     expect(theme.spacing.navbar).toBe("80px");
+  });
+
+  it("names the reading width measure, so Tailwind's own max-w-prose (65ch) can't win", () => {
+    expect(theme.maxWidth.measure).toBe("768px");
+    expect(Object.keys(theme.maxWidth).filter((k) => k.includes("prose"))).toEqual([]);
   });
 
   it("sets the system sans, as the site does", () => {
@@ -4553,7 +4560,9 @@ Expected: FAIL, `Failed to resolve import "../design/theme" from "src/test/theme
  * Colours keep their token names (bg-space-darkBlue, ring, input), type
  * styles become sizes by role (text-section-title-sm, text-label), radii
  * and shadows keep theirs (rounded-lg, shadow-glow-blue), and layout widths
- * lose their suffix (max-w-shell, max-w-prose; h-navbar). */
+ * lose their suffix (max-w-shell, max-w-panel; h-navbar). prose-max becomes
+ * max-w-measure: Tailwind's own prose width (65ch) would win over a token
+ * of that name, so the reading width takes a name Tailwind doesn't use. */
 
 interface Named {
   name: string;
@@ -4601,7 +4610,8 @@ export function themeFromTokens(t: Tokens) {
     }
   }
 
-  const layout = byName(t.layout.tokens, (n) => n.replace(/-(max|height)$/, ""));
+  const layout = byName(t.layout.tokens, (n) =>
+    n === "prose-max" ? "measure" : n.replace(/-(max|height)$/, ""));
   return {
     colors,
     fontFamily: { sans: t.type.families.sans, mono: t.type.families.mono },
@@ -4632,8 +4642,15 @@ export default {
 ```css
 @import "tailwindcss";
 @config "../tailwind.config.ts";
+/* tokens.json's usage notes and the tests name classes; don't build them. */
+@source not "./test";
+@source not "./design/tokens.json";
 
 @layer base {
+  /* One dark theme: native controls and scrollbars draw dark too. */
+  :root {
+    color-scheme: dark;
+  }
   html,
   body,
   #root {
@@ -4690,7 +4707,7 @@ createRoot(document.getElementById("root")!).render(
 **Step 5: Run it to see it pass, and build**
 
 Run: `cd apps/desktop && npm test`
-Expected: `5 passed`.
+Expected: `6 passed`.
 
 Run: `cd apps/desktop && npm run build && grep -c "0d1117" dist/assets/*.css`
 Expected: the build succeeds and the count is at least `1` (the token colour reached the CSS).
@@ -4758,6 +4775,15 @@ describe("the Q7 components", () => {
     const input = screen.getByLabelText("Username");
     expect(input).toHaveAttribute("aria-invalid", "true");
     expect(input).toHaveAccessibleDescription("Lower case is fine. That username is taken.");
+  });
+
+  it("keeps the field's wiring over anything passed in, and a visible edge", () => {
+    render(<TextField label="Email" id="mine" aria-describedby="other" hint="Work email." />);
+    const input = screen.getByLabelText("Email");
+    expect(input.id).not.toBe("mine");
+    expect(input).toHaveAccessibleDescription("Work email.");
+    expect(input).toHaveClass("border-space-gray/70");
+    expect(input).not.toHaveClass("border-input");
   });
 
   it("leaves a field without an error unmarked", () => {
@@ -4896,10 +4922,12 @@ import { useId, type ComponentProps, type ReactNode } from "react";
 import { TriangleAlert } from "lucide-react";
 import { cn } from "./cn";
 
-// The design system's Input and Textarea: radius-md, the input border on the
-// background fill, the focus ring. A field that is wrong takes a gold edge.
+// The design system's Input and Textarea: radius-md on the background fill,
+// the focus ring. The edge is space-gray/70 (about 3.5:1 on the ground, as
+// WCAG 1.4.11 asks; the token's input colour is 1.2:1). A field that is
+// wrong takes a gold edge.
 const control =
-  "w-full rounded-md border border-input bg-background px-3 text-space-lightGray " +
+  "w-full rounded-md border border-space-gray/70 bg-background px-3 text-space-lightGray " +
   "placeholder:text-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring " +
   "disabled:cursor-not-allowed disabled:opacity-50 aria-[invalid=true]:border-space-gold";
 
@@ -4909,7 +4937,7 @@ export function Input({ className, ...props }: ComponentProps<"input">) {
 }
 
 export function Textarea({ className, ...props }: ComponentProps<"textarea">) {
-  return <textarea className={cn(control, "min-h-[80px] py-2 text-body-sm", className)} {...props} />;
+  return <textarea className={cn(control, "min-h-[80px] py-2 text-base md:text-sm", className)} {...props} />;
 }
 
 export function Select({ className, ...props }: ComponentProps<"select">) {
@@ -4930,7 +4958,8 @@ interface Labelled {
 }
 
 /** A label, the control, a hint and what is wrong, wired together. The
- * error is gold with an icon and words: colour is never the only sign. */
+ * error is gold with an icon and words: colour is never the only sign.
+ * The wiring is spread last, so nothing passed in can unhook the label. */
 export function Field({ label, error, hint, className, children }: Labelled & { children: (control: Control) => ReactNode }) {
   const id = useId();
   const hintId = `${id}-hint`;
@@ -4954,7 +4983,7 @@ export function Field({ label, error, hint, className, children }: Labelled & { 
 export function TextField({ label, error, hint, className, ...props }: Labelled & ComponentProps<"input">) {
   return (
     <Field label={label} error={error} hint={hint} className={className}>
-      {(c) => <Input {...c} {...props} />}
+      {(c) => <Input {...props} {...c} />}
     </Field>
   );
 }
@@ -4962,7 +4991,7 @@ export function TextField({ label, error, hint, className, ...props }: Labelled 
 export function TextAreaField({ label, error, hint, className, ...props }: Labelled & ComponentProps<"textarea">) {
   return (
     <Field label={label} error={error} hint={hint} className={className}>
-      {(c) => <Textarea {...c} {...props} />}
+      {(c) => <Textarea {...props} {...c} />}
     </Field>
   );
 }
@@ -4970,7 +4999,7 @@ export function TextAreaField({ label, error, hint, className, ...props }: Label
 export function SelectField({ label, error, hint, className, children, ...props }: Labelled & ComponentProps<"select">) {
   return (
     <Field label={label} error={error} hint={hint} className={className}>
-      {(c) => <Select {...c} {...props}>{children}</Select>}
+      {(c) => <Select {...props} {...c}>{children}</Select>}
     </Field>
   );
 }
@@ -5069,7 +5098,7 @@ interface SectionHeadingProps {
 export function SectionHeading({ accentText, children, description, accent = "blue", level = 1, className }: SectionHeadingProps) {
   const Tag = `h${level}` as "h1" | "h2";
   return (
-    <div className={cn("flex max-w-prose flex-col gap-3", className)}>
+    <div className={cn("flex max-w-measure flex-col gap-3", className)}>
       <Tag className="text-section-title-sm text-space-lightGray">
         <span className={accent === "gold" ? "text-space-gold" : "text-space-blue"}>{accentText}</span>
         {children ? <> {children}</> : null}
@@ -5115,7 +5144,10 @@ export function Notice({ tone = "warning", className, children }: { tone?: Tone;
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `14 passed` (5 theme, 9 components).
+Expected: `16 passed` (6 theme, 10 components).
+
+Run: `cd apps/desktop && npm run build && grep -c "max-width:768px" dist/assets/*.css && grep -c "65ch" dist/assets/*.css`
+Expected: `1` then `0`: SectionHeading's `max-w-measure` is the token's 768px, and nothing built Tailwind's own 65ch `max-w-prose`.
 
 **Step 5: Commit**
 
@@ -5139,7 +5171,7 @@ git commit -m "Recreate the Q7 components the desktop needs from the design syst
 
 `apps/desktop/src/test/marks.test.tsx`:
 ```tsx
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { OrgMark } from "../ui/OrgMark";
 import { SimpleDocsMark } from "../ui/SimpleDocsMark";
 import { makeStars, StarField } from "../ui/StarField";
@@ -5175,6 +5207,15 @@ describe("the marks and the star field", () => {
     rerender(<OrgMark logoId={null} />);
     expect(container.querySelector("img")).toBeNull();
     expect(container.querySelector("svg")).not.toBeNull();
+  });
+
+  it("falls back to the mark when the logo won't load, and tries a new logo afresh", () => {
+    const { container, rerender } = render(<OrgMark logoId="logo-1" />);
+    fireEvent.error(container.querySelector("img")!);
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("svg")).not.toBeNull();
+    rerender(<OrgMark logoId="logo-2" />);
+    expect(container.querySelector("img")).toHaveAttribute("src", "/api/v1/branding/logo?v=logo-2");
   });
 });
 ```
@@ -5261,13 +5302,16 @@ export function SimpleDocsMark({ size = 32, title }: { size?: number; title?: st
 
 `apps/desktop/src/ui/OrgMark.tsx`:
 ```tsx
+import { useState } from "react";
 import { SimpleDocsMark } from "./SimpleDocsMark";
 
 /** The organisation's logo from Settings, or Simple Docs' mark when there is
- * none. The name beside it says whose it is, so the picture is decorative.
- * The logo's id is in the address, so a new upload is fetched afresh. */
+ * none or it won't load. The name beside it says whose it is, so the picture
+ * is decorative. The logo's id is in the address, so a new upload is fetched
+ * afresh, and a new id gets a fresh try after one that failed. */
 export function OrgMark({ logoId, size = 32 }: { logoId: string | null; size?: number }) {
-  if (logoId) {
+  const [failed, setFailed] = useState<string | null>(null);
+  if (logoId && failed !== logoId) {
     return (
       <img
         src={`/api/v1/branding/logo?v=${encodeURIComponent(logoId)}`}
@@ -5275,6 +5319,7 @@ export function OrgMark({ logoId, size = 32 }: { logoId: string | null; size?: n
         width={size}
         height={size}
         className="rounded-sm object-contain"
+        onError={() => setFailed(logoId)}
       />
     );
   }
@@ -5296,7 +5341,7 @@ export function OrgMark({ logoId, size = 32 }: { logoId: string | null; size?: n
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `17 passed`.
+Expected: `20 passed`.
 
 **Step 5: Commit**
 
@@ -5386,11 +5431,39 @@ describe("ApiClient", () => {
     expect(signedOut).not.toHaveBeenCalled();
   });
 
+  it("doesn't take a lock on changing your own password for an ended session", async () => {
+    const signedOut = vi.fn();
+    client.onSignedOut = signedOut;
+    answers.push(json(401, { error: { code: "locked",
+                                      message: "Too many wrong passwords. Try again in 15 minutes." } }));
+    const e = (await client.post("/v1/auth/password", {}).catch((x) => x)) as ApiError;
+    expect([e.status, e.code]).toEqual([401, "locked"]);
+    expect(signedOut).not.toHaveBeenCalled();
+  });
+
   it("says Simple Docs can't be reached when there is no proper answer", async () => {
     answers.push(new TypeError("Failed to fetch"));
     await expect(client.get("/v1/health")).rejects.toBeInstanceOf(Unreachable);
     answers.push(new Response("<html>Bad gateway</html>", { status: 502 }));
     await expect(client.get("/v1/health")).rejects.toThrow("Can't reach Simple Docs right now.");
+    for (const status of [503, 504]) {
+      answers.push(new Response("<html>down</html>", { status }));
+      await expect(client.get("/v1/health")).rejects.toBeInstanceOf(Unreachable);
+    }
+  });
+
+  it("says what answered when something other than the API's JSON came back", async () => {
+    answers.push(new Response("<html>Not found</html>", { status: 404 }));
+    const e = (await client.get("/v1/nowhere").catch((x) => x)) as ApiError;
+    expect(e).toBeInstanceOf(ApiError);
+    expect([e.status, e.code, e.message]).toEqual([404, "unexpected", "Simple Docs answered 404. Try again."]);
+    answers.push(new Response("oops", { status: 500 }));
+    await expect(client.get("/v1/health")).rejects.toMatchObject({ status: 500, code: "unexpected" });
+  });
+
+  it("names its errors", () => {
+    expect(new ApiError(400, "x", "y").name).toBe("ApiError");
+    expect(new Unreachable().name).toBe("Unreachable");
   });
 
   it("puts any trouble into words", () => {
@@ -5462,6 +5535,7 @@ export interface Org {
 export const BASE = "/api";
 
 export class ApiError extends Error {
+  override name = "ApiError";
   readonly status: number;
   /** For programs: wrong_password, locked, last_admin, ... */
   readonly code: string;
@@ -5476,8 +5550,9 @@ export class ApiError extends Error {
   }
 }
 
-/** The API could not be reached, or what answered wasn't the API. */
+/** The API could not be reached, or a gateway answered for it. */
 export class Unreachable extends Error {
+  override name = "Unreachable";
   constructor() {
     super("Can't reach Simple Docs right now. Check it's running, then try again.");
   }
@@ -5488,6 +5563,9 @@ export class Unreachable extends Error {
 export function messageOf(e: unknown): string {
   return e instanceof ApiError || e instanceof Unreachable ? e.message : "Something went wrong. Try again.";
 }
+
+/** What a proxy answers when the API behind it is down or slow. */
+const GATEWAY = new Set([502, 503, 504]);
 
 type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -5527,8 +5605,10 @@ export class ApiClient {
       const text = await res.text();
       parsed = text ? JSON.parse(text) : null;
     } catch {
-      // a proxy's error page, say: not the API's own answer
-      throw new Unreachable();
+      // Not the API's own answer. A gateway's error page means the API is
+      // down; anything else is said with its status.
+      if (GATEWAY.has(res.status)) throw new Unreachable();
+      throw new ApiError(res.status, "unexpected", `Simple Docs answered ${res.status}. Try again.`);
     }
     if (res.ok) return parsed as T;
     const error = (parsed as ErrorBody | null)?.error;
@@ -5564,7 +5644,7 @@ export const api = new ApiClient();
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `24 passed`.
+Expected: `30 passed`.
 
 **Step 5: Commit**
 
@@ -6164,7 +6244,7 @@ export function App() {
 **Step 4: Run them to see them pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `35 passed`.
+Expected: `41 passed`.
 
 **Step 5: Commit**
 
@@ -6428,7 +6508,7 @@ export function AppRoutes() {
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `44 passed`.
+Expected: `50 passed`.
 
 **Step 5: Commit**
 
@@ -6856,7 +6936,7 @@ and add inside the `Layout` route, after the Spend route:
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `52 passed`.
+Expected: `58 passed`.
 
 **Step 5: Commit**
 
@@ -7170,7 +7250,7 @@ import { OrgSettings } from "./pages/OrgSettings";
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `59 passed`.
+Expected: `65 passed`.
 
 **Step 5: Commit**
 
@@ -7344,7 +7424,7 @@ import { Account } from "./pages/Account";
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test && npm run lint && npm run build`
-Expected: `63 passed`, no lint problems, and a build.
+Expected: `69 passed`, no lint problems, and a build.
 
 **Step 5: Commit**
 
@@ -7835,7 +7915,7 @@ Expected: `93 passed`, `All checks passed!`, `Success: no issues found`.
 **Step 2: The desktop**
 
 Run: `cd apps/desktop && npm test && npm run lint && npm run build`
-Expected: `63 passed`, no lint problems, a build in `dist/`.
+Expected: `69 passed`, no lint problems, a build in `dist/`.
 
 **Step 3: From nothing**
 

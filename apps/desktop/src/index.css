@@ -1,7 +1,14 @@
 @import "tailwindcss";
 @config "../tailwind.config.ts";
+/* tokens.json's usage notes and the tests name classes; don't build them. */
+@source not "./test";
+@source not "./design/tokens.json";
 
 @layer base {
+  /* One dark theme: native controls and scrollbars draw dark too. */
+  :root {
+    color-scheme: dark;
+  }
   html,
   body,
   #root {

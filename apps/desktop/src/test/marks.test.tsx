@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { OrgMark } from "../ui/OrgMark";
 import { SimpleDocsMark } from "../ui/SimpleDocsMark";
 import { makeStars, StarField } from "../ui/StarField";
@@ -34,5 +34,14 @@ describe("the marks and the star field", () => {
     rerender(<OrgMark logoId={null} />);
     expect(container.querySelector("img")).toBeNull();
     expect(container.querySelector("svg")).not.toBeNull();
+  });
+
+  it("falls back to the mark when the logo won't load, and tries a new logo afresh", () => {
+    const { container, rerender } = render(<OrgMark logoId="logo-1" />);
+    fireEvent.error(container.querySelector("img")!);
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("svg")).not.toBeNull();
+    rerender(<OrgMark logoId="logo-2" />);
+    expect(container.querySelector("img")).toHaveAttribute("src", "/api/v1/branding/logo?v=logo-2");
   });
 });

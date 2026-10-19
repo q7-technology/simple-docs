@@ -5,7 +5,9 @@
  * Colours keep their token names (bg-space-darkBlue, ring, input), type
  * styles become sizes by role (text-section-title-sm, text-label), radii
  * and shadows keep theirs (rounded-lg, shadow-glow-blue), and layout widths
- * lose their suffix (max-w-shell, max-w-prose; h-navbar). */
+ * lose their suffix (max-w-shell, max-w-panel; h-navbar). prose-max becomes
+ * max-w-measure: Tailwind's own prose width (65ch) would win over a token
+ * of that name, so the reading width takes a name Tailwind doesn't use. */
 
 interface Named {
   name: string;
@@ -53,7 +55,8 @@ export function themeFromTokens(t: Tokens) {
     }
   }
 
-  const layout = byName(t.layout.tokens, (n) => n.replace(/-(max|height)$/, ""));
+  const layout = byName(t.layout.tokens, (n) =>
+    n === "prose-max" ? "measure" : n.replace(/-(max|height)$/, ""));
   return {
     colors,
     fontFamily: { sans: t.type.families.sans, mono: t.type.families.mono },

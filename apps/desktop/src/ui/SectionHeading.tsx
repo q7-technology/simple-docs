@@ -19,7 +19,7 @@ interface SectionHeadingProps {
 export function SectionHeading({ accentText, children, description, accent = "blue", level = 1, className }: SectionHeadingProps) {
   const Tag = `h${level}` as "h1" | "h2";
   return (
-    <div className={cn("flex max-w-prose flex-col gap-3", className)}>
+    <div className={cn("flex max-w-measure flex-col gap-3", className)}>
       <Tag className="text-section-title-sm text-space-lightGray">
         <span className={accent === "gold" ? "text-space-gold" : "text-space-blue"}>{accentText}</span>
         {children ? <> {children}</> : null}
