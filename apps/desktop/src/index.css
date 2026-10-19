@@ -1,0 +1,34 @@
+@import "tailwindcss";
+@config "../tailwind.config.ts";
+
+@layer base {
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+  body {
+    @apply bg-space-darkBlue font-sans text-body text-space-lightGray antialiased;
+  }
+  /* The focus ring: 2px ring with a 2px offset. Never removed. */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-ring;
+  }
+  /* lucide icons at 1.5px, everywhere (design system: Iconography) */
+  svg.lucide {
+    stroke-width: 1.5;
+  }
+}
+
+/* Anyone who asks for less motion gets every animation and transition at its
+   last frame (design: Look). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
