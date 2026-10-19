@@ -332,7 +332,11 @@ def run_migrations_online() -> None:
     )
     try:
         with connectable.connect() as connection:
-            context.configure(connection=connection, target_metadata=target_metadata)
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                compare_server_default=True,
+            )
             with context.begin_transaction():
                 context.run_migrations()
     finally:
@@ -942,9 +946,8 @@ import os
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, text
-
 from conftest import TEST_DATABASE_URL
+from sqlalchemy import CheckConstraint, create_engine, text
 
 MIGRATION_URL = TEST_DATABASE_URL.rsplit("/", 1)[0] + "/sdocs_migration_check"
 TABLES = {"app_user", "session", "setting", "org_logo", "alembic_version"}
@@ -1003,6 +1006,7 @@ def test_migrations_go_up_down_and_up_again(blank_database):
     command.downgrade(cfg, "base")
     assert _tables(engine) == {"alembic_version"}
     assert "block_change" not in _functions(engine)
+    assert _one_column(engine, "select tgname from pg_trigger where not tgisinternal") == set()
 
     command.upgrade(cfg, "head")
     assert _tables(engine) == TABLES
@@ -1019,9 +1023,17 @@ def test_the_models_match_the_migrations(blank_database):
     command.upgrade(alembic_config(blank_database), "head")
     engine = create_engine(blank_database)
     with engine.connect() as conn:
-        diff = compare_metadata(MigrationContext.configure(conn), Base.metadata)
+        context = MigrationContext.configure(conn, opts={"compare_server_default": True})
+        diff = compare_metadata(context, Base.metadata)
+    # compare_metadata does not look at check constraints, so compare their names
+    in_database = _one_column(engine, "select c.conname from pg_constraint c join pg_namespace n "
+                                      "on n.oid = c.connamespace "
+                                      "where c.contype = 'c' and n.nspname = 'public'")
     engine.dispose()
     assert diff == [], f"the models and the migrations disagree: {diff}"
+    in_models = {str(c.name) for t in Base.metadata.sorted_tables for c in t.constraints
+                 if isinstance(c, CheckConstraint)}
+    assert in_models == in_database
 ```
 
 `api/tests/test_kept.py`:
@@ -1029,11 +1041,14 @@ def test_the_models_match_the_migrations(blank_database):
 """block_change() keeps rows as they are. Step 2's document_version uses it
 for UPDATE and DELETE (append-only); app_user uses it for DELETE now, because
 people are deactivated, never deleted (rule 1)."""
+import re
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import DBAPIError
 
-from sdocs.models import AppUser
+from sdocs.models import ROLES, AppUser, UserSession
 
 
 def _scratch(db):
@@ -1081,6 +1096,29 @@ def test_the_database_keeps_usernames_lower_case_and_roles_known(db):
     with pytest.raises(DBAPIError, match="ck_app_user_role"):
         db.add(AppUser(username="kim", password_hash="x", display_name="Kim", role="owner"))
         db.flush()
+
+
+def test_the_roles_the_code_knows_are_the_roles_the_database_allows(db):
+    check = db.execute(text("select pg_get_constraintdef(oid) from pg_constraint "
+                            "where conname = 'ck_app_user_role'")).scalar_one()
+    assert set(re.findall(r"'(\w+)'", check)) == set(ROLES)
+
+
+def test_a_person_added_by_hand_is_active_with_no_failed_attempts(db):
+    row = db.execute(text("insert into app_user (username, password_hash, display_name, role) "
+                          "values ('kim', 'x', 'Kim', 'editor') "
+                          "returning active, failed_attempts")).one()
+    assert (row.active, row.failed_attempts) == (True, 0)
+
+
+def test_a_session_keeps_a_whole_sha256(db):
+    kim = AppUser(username="kim", password_hash="x", display_name="Kim", role="editor")
+    db.add(kim)
+    db.flush()
+    now = datetime.now(UTC)
+    with pytest.raises(DBAPIError, match="ck_session_token_hash_sha256"):
+        db.add(UserSession(created_by=kim.id, token_hash="abc", last_seen_at=now, expires_at=now))
+        db.flush()
 ```
 
 **Step 2: Run them to see them fail**
@@ -1097,7 +1135,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from sdocs.models.base import Base, created_at_column, uuid_pk
@@ -1123,9 +1161,9 @@ class AppUser(Base):
     password_hash: Mapped[str] = mapped_column(String(200))
     display_name: Mapped[str] = mapped_column(String(120))
     role: Mapped[str] = mapped_column(String(16))
-    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     # wrong passwords in a row; five lock the password until locked_until
-    failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_sign_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = created_at_column()
@@ -1133,13 +1171,14 @@ class AppUser(Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("app_user.id"))
 
 
-class Session(Base):
+class UserSession(Base):
     """One signed-in browser (or script with a cookie jar). Only the token's
     SHA-256 is kept. Ends 12 hours after its last request, 14 days after
     sign-in whatever happens, on sign-out, on a new password and on
     deactivation (sdocs/services/sessions.py)."""
 
     __tablename__ = "session"
+    __table_args__ = (CheckConstraint("length(token_hash) = 64", name="token_hash_sha256"),)
 
     id: Mapped[uuid.UUID] = uuid_pk()
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
@@ -1206,9 +1245,9 @@ class OrgLogo(Base):
 ```python
 from sdocs.models.base import Base
 from sdocs.models.settings import OrgLogo, Setting
-from sdocs.models.users import ROLES, AppUser, Session
+from sdocs.models.users import ROLES, AppUser, UserSession
 
-__all__ = ["ROLES", "AppUser", "Base", "OrgLogo", "Session", "Setting"]
+__all__ = ["ROLES", "AppUser", "Base", "OrgLogo", "Setting", "UserSession"]
 ```
 
 `api/alembic/versions/0001_skeleton.py`:
@@ -1249,8 +1288,8 @@ def upgrade() -> None:
         sa.Column("password_hash", sa.String(length=200), nullable=False),
         sa.Column("display_name", sa.String(length=120), nullable=False),
         sa.Column("role", sa.String(length=16), nullable=False),
-        sa.Column("active", sa.Boolean(), nullable=False),
-        sa.Column("failed_attempts", sa.Integer(), nullable=False),
+        sa.Column("active", sa.Boolean(), server_default=sa.true(), nullable=False),
+        sa.Column("failed_attempts", sa.Integer(), server_default="0", nullable=False),
         sa.Column("locked_until", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_sign_in_at", sa.DateTime(timezone=True), nullable=True),
         _created_at(),
@@ -1273,6 +1312,7 @@ def upgrade() -> None:
         sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
+        sa.CheckConstraint("length(token_hash) = 64", name=op.f("ck_session_token_hash_sha256")),
         sa.ForeignKeyConstraint(["created_by"], ["app_user.id"],
                                 name=op.f("fk_session_created_by_app_user")),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_session")),
@@ -1341,11 +1381,11 @@ def downgrade() -> None:
 **Step 4: Run them to see them pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_migrations.py tests/test_kept.py -v`
-Expected: `7 passed`.
+Expected: `10 passed`.
 
 Then the whole suite (the session fixture now builds the new tables):
 Run: `cd api && .venv/bin/pytest -q`
-Expected: `17 passed`.
+Expected: `20 passed`.
 
 **Step 5: Commit**
 
@@ -1515,7 +1555,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from sdocs.models import Session
+from sdocs.models import UserSession
 from sdocs.services import sessions
 
 NOW = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
@@ -1524,7 +1564,7 @@ NOW = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
 def test_a_token_is_kept_only_as_its_hash(db, editor):
     raw = sessions.start(db, editor, NOW)
     db.commit()
-    row = db.execute(select(Session)).scalar_one()
+    row = db.execute(select(UserSession)).scalar_one()
     assert raw.startswith("sdocs_s.") and len(raw) > 40
     assert row.token_hash == hashlib.sha256(raw.encode()).hexdigest()
     assert raw not in row.token_hash
@@ -1625,7 +1665,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session as Db
 
-from sdocs.models import AppUser, Session
+from sdocs.models import AppUser, UserSession
 
 PREFIX = "sdocs_s."
 IDLE = timedelta(hours=12)
@@ -1655,19 +1695,21 @@ def start(db: Db, user: AppUser, now: datetime | None = None) -> str:
     """A new session; the raw token is returned once and never stored."""
     now = now or datetime.now(UTC)
     raw = PREFIX + secrets.token_urlsafe(32)
-    db.add(Session(created_by=user.id, token_hash=_hash(raw), last_seen_at=now,
-                   expires_at=now + LIFETIME))
+    db.add(UserSession(created_by=user.id, token_hash=_hash(raw), last_seen_at=now,
+                       expires_at=now + LIFETIME))
     db.flush()
     return raw
 
 
-def find(db: Db, raw: str, now: datetime | None = None) -> Session | None:
+def find(db: Db, raw: str, now: datetime | None = None) -> UserSession | None:
     """The live session for this token, marked as just used; None if it is
     not ours, ended, too old or idle too long."""
     if not raw.startswith(PREFIX):
         return None
     now = now or datetime.now(UTC)
-    row = db.execute(select(Session).where(Session.token_hash == _hash(raw))).scalar_one_or_none()
+    row = db.execute(
+        select(UserSession).where(UserSession.token_hash == _hash(raw))
+    ).scalar_one_or_none()
     if (row is None or row.revoked_at is not None or row.expires_at <= now
             or now - row.last_seen_at > IDLE):
         return None
@@ -1678,17 +1720,18 @@ def find(db: Db, raw: str, now: datetime | None = None) -> Session | None:
 
 
 def end(db: Db, raw: str) -> None:
-    db.execute(update(Session).where(Session.token_hash == _hash(raw),
-                                     Session.revoked_at.is_(None))
+    db.execute(update(UserSession).where(UserSession.token_hash == _hash(raw),
+                                         UserSession.revoked_at.is_(None))
                .values(revoked_at=datetime.now(UTC)))
     db.flush()
 
 
-def end_all(db: Db, user: AppUser, keep: Session | None = None) -> None:
+def end_all(db: Db, user: AppUser, keep: UserSession | None = None) -> None:
     """End every session of this person, but `keep` (the one asking) if given."""
-    q = update(Session).where(Session.created_by == user.id, Session.revoked_at.is_(None))
+    q = update(UserSession).where(UserSession.created_by == user.id,
+                                  UserSession.revoked_at.is_(None))
     if keep is not None:
-        q = q.where(Session.id != keep.id)
+        q = q.where(UserSession.id != keep.id)
     db.execute(q.values(revoked_at=datetime.now(UTC)))
     db.flush()
 ```
@@ -1758,7 +1801,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import update
 
 from conftest import PASSWORD, all_at_once, fresh_client, make_user, sign_in
-from sdocs.models import AppUser, Session
+from sdocs.models import AppUser, UserSession
 
 WRONG = {"error": {"code": "wrong_password", "message": "Wrong username or password."}}
 
@@ -1857,7 +1900,7 @@ def test_signing_out_ends_the_session(client, editor):
 
 def test_12_hours_without_a_request_signs_you_out(client, db, editor):
     sign_in(client, "mel")
-    db.execute(update(Session).values(last_seen_at=datetime.now(UTC) - timedelta(hours=12, minutes=1)))
+    db.execute(update(UserSession).values(last_seen_at=datetime.now(UTC) - timedelta(hours=12, minutes=1)))
     db.commit()
     assert client.get("/v1/auth/me").json()["error"]["code"] == "signed_out"
 
@@ -1888,7 +1931,7 @@ from sqlalchemy.orm import Session as Db
 
 from sdocs.api.errors import ApiError, forbidden
 from sdocs.db import get_sessionmaker
-from sdocs.models import AppUser, Session
+from sdocs.models import AppUser, UserSession
 from sdocs.services import sessions
 
 COOKIE = "sdocs_session"
@@ -1907,7 +1950,7 @@ class Principal:
     """Whoever is calling: a person with a live session."""
 
     user: AppUser
-    session: Session
+    session: UserSession
     scopes: list[str]
 
     def has_scope(self, scope: str) -> bool:
@@ -2171,7 +2214,7 @@ app.add_middleware(SameSiteOnly)
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest -q`
-Expected: `44 passed`.
+Expected: `47 passed`.
 
 **Step 5: Commit**
 
@@ -3508,7 +3551,7 @@ Expected: `4 passed`.
 
 Then the whole API, with lint and types:
 Run: `cd api && .venv/bin/pytest -q && .venv/bin/ruff check . && .venv/bin/mypy`
-Expected: `90 passed`, `All checks passed!` and `Success: no issues found in ... source files` (fix anything ruff or mypy reports before committing).
+Expected: `93 passed`, `All checks passed!` and `Success: no issues found in ... source files` (fix anything ruff or mypy reports before committing).
 
 **Step 5: Commit**
 
@@ -7149,7 +7192,7 @@ git commit -m "Write the README and bring CLAUDE.md's layout up to date" \
 **Step 1: The API**
 
 Run: `cd api && .venv/bin/pytest -q && .venv/bin/ruff check . && .venv/bin/mypy`
-Expected: `90 passed`, `All checks passed!`, `Success: no issues found`.
+Expected: `93 passed`, `All checks passed!`, `Success: no issues found`.
 
 **Step 2: The desktop**
 

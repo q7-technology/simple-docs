@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from sdocs.models.base import Base, created_at_column, uuid_pk
@@ -29,9 +29,9 @@ class AppUser(Base):
     password_hash: Mapped[str] = mapped_column(String(200))
     display_name: Mapped[str] = mapped_column(String(120))
     role: Mapped[str] = mapped_column(String(16))
-    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     # wrong passwords in a row; five lock the password until locked_until
-    failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_sign_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = created_at_column()
@@ -39,13 +39,14 @@ class AppUser(Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("app_user.id"))
 
 
-class Session(Base):
+class UserSession(Base):
     """One signed-in browser (or script with a cookie jar). Only the token's
     SHA-256 is kept. Ends 12 hours after its last request, 14 days after
     sign-in whatever happens, on sign-out, on a new password and on
     deactivation (sdocs/services/sessions.py)."""
 
     __tablename__ = "session"
+    __table_args__ = (CheckConstraint("length(token_hash) = 64", name="token_hash_sha256"),)
 
     id: Mapped[uuid.UUID] = uuid_pk()
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)

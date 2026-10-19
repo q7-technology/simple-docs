@@ -6,7 +6,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from conftest import TEST_DATABASE_URL
-from sqlalchemy import create_engine, text
+from sqlalchemy import CheckConstraint, create_engine, text
 
 MIGRATION_URL = TEST_DATABASE_URL.rsplit("/", 1)[0] + "/sdocs_migration_check"
 TABLES = {"app_user", "session", "setting", "org_logo", "alembic_version"}
@@ -65,6 +65,7 @@ def test_migrations_go_up_down_and_up_again(blank_database):
     command.downgrade(cfg, "base")
     assert _tables(engine) == {"alembic_version"}
     assert "block_change" not in _functions(engine)
+    assert _one_column(engine, "select tgname from pg_trigger where not tgisinternal") == set()
 
     command.upgrade(cfg, "head")
     assert _tables(engine) == TABLES
@@ -81,6 +82,14 @@ def test_the_models_match_the_migrations(blank_database):
     command.upgrade(alembic_config(blank_database), "head")
     engine = create_engine(blank_database)
     with engine.connect() as conn:
-        diff = compare_metadata(MigrationContext.configure(conn), Base.metadata)
+        context = MigrationContext.configure(conn, opts={"compare_server_default": True})
+        diff = compare_metadata(context, Base.metadata)
+    # compare_metadata does not look at check constraints, so compare their names
+    in_database = _one_column(engine, "select c.conname from pg_constraint c join pg_namespace n "
+                                      "on n.oid = c.connamespace "
+                                      "where c.contype = 'c' and n.nspname = 'public'")
     engine.dispose()
     assert diff == [], f"the models and the migrations disagree: {diff}"
+    in_models = {str(c.name) for t in Base.metadata.sorted_tables for c in t.constraints
+                 if isinstance(c, CheckConstraint)}
+    assert in_models == in_database
