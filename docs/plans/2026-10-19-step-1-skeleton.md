@@ -2372,9 +2372,9 @@ git commit -m "Refuse a change that doesn't carry X-Simple-Docs: 1" \
 
 `api/tests/test_setup.py`:
 ```python
+from conftest import all_at_once, fresh_client
 from sqlalchemy import func, select
 
-from conftest import all_at_once, fresh_client
 from sdocs.models import AppUser, Setting
 
 FIRST = {"org_name": " Acme  Pty Ltd ", "display_name": "Leighton Lauton",
@@ -2428,6 +2428,21 @@ def test_first_run_checks_what_it_is_given(client):
         "password": "Use at least 12 characters.",
     }
     assert client.get("/v1/branding").json()["setup_needed"] is True
+
+
+def test_an_install_whose_only_person_is_deactivated_stays_set_up(client, db, editor):
+    editor.active = False
+    db.commit()
+    assert client.get("/v1/branding").json()["setup_needed"] is False
+    assert client.post("/v1/setup", json=FIRST).status_code == 409
+
+
+def test_control_characters_are_refused_not_a_500(client):
+    r = client.post("/v1/setup", json={**FIRST, "org_name": "A\u0000B"})
+    assert r.status_code == 422
+    assert r.json()["error"]["fields"] == {
+        "org_name": "Use letters, numbers and punctuation only."}
+    assert client.get("/v1/branding").json()["setup_needed"] is True
 ```
 
 **Step 2: Run it to see it fail**
@@ -2453,19 +2468,22 @@ from sqlalchemy.orm import Session as Db
 
 from sdocs.models import AppUser, Setting
 
-ORG_KEYS = ("org.name", "org.abn", "org.phone", "org.email", "org.address", "org.logo")
+ORG_NAME = "org.name"
+ORG_LOGO = "org.logo"
+ORG_KEYS = (ORG_NAME, "org.abn", "org.phone", "org.email", "org.address", ORG_LOGO)
 
 
 def read(db: Db, keys: Iterable[str]) -> dict[str, Any]:
     """Each key's value, or None where nothing is set."""
     keys = tuple(keys)
-    found = dict(db.execute(select(Setting.key, Setting.value)
-                            .where(Setting.key.in_(keys))).tuples().all())
+    found: dict[str, Any] = {key: value for key, value in db.execute(
+        select(Setting.key, Setting.value).where(Setting.key.in_(keys)))}
     return {key: found.get(key) for key in keys}
 
 
 def write(db: Db, values: dict[str, Any], by: AppUser | None) -> None:
-    """Set each key (None clears it), noting who. Not committed."""
+    """Set each key (None clears it), noting who. Not committed. Keys are
+    defined in code, never taken from what a request sends."""
     who = by.id if by is not None else None
     for key, value in values.items():
         stmt = insert(Setting).values(key=key, value=value, created_by=who, updated_by=who)
@@ -2481,6 +2499,7 @@ def write(db: Db, values: dict[str, Any], by: AppUser | None) -> None:
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Annotated, Literal
 
 from pydantic import AfterValidator, Field
@@ -2505,12 +2524,21 @@ def new_password(value: str) -> str:
     return value
 
 
+def no_control_chars(value: str) -> str:
+    """Refuses control characters (NUL and the like), which PostgreSQL can't
+    store and nobody types. Run it after spaces are tidied: tabs and newlines
+    are control characters too."""
+    if any(unicodedata.category(c) == "Cc" for c in value):
+        raise ValueError("Use letters, numbers and punctuation only.")
+    return value
+
+
 def plain_name(value: str) -> str:
-    """Spaces tidied; never blank."""
+    """Spaces tidied; never blank; no control characters."""
     value = " ".join(value.split())
     if not value:
         raise ValueError("Can't be blank.")
-    return value
+    return no_control_chars(value)
 
 
 Username = Annotated[str, Field(max_length=200), AfterValidator(normal_username)]
@@ -2530,6 +2558,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Response
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
+from sqlalchemy.orm import Session as Db
 
 from sdocs.api.deps import DB
 from sdocs.api.errors import ApiError
@@ -2548,7 +2577,7 @@ class BrandingOut(BaseModel):
     logo_id: str | None
 
 
-def anyone(db) -> bool:
+def anyone(db: Db) -> bool:
     return db.execute(select(AppUser.id).limit(1)).first() is not None
 
 
@@ -2556,9 +2585,9 @@ def anyone(db) -> bool:
 def branding(db: DB):
     """Whether first run is needed, and the organisation's name and logo.
     Needs no session: the sign-in page shows them."""
-    org = settings.read(db, ("org.name", "org.logo"))
-    return BrandingOut(setup_needed=not anyone(db), org_name=org["org.name"],
-                       logo_id=org["org.logo"])
+    org = settings.read(db, (settings.ORG_NAME, settings.ORG_LOGO))
+    return BrandingOut(setup_needed=not anyone(db), org_name=org[settings.ORG_NAME],
+                       logo_id=org[settings.ORG_LOGO])
 
 
 class SetupIn(BaseModel):
@@ -2581,7 +2610,7 @@ def setup(body: SetupIn, db: DB, response: Response):
                     failed_attempts=0)
     db.add(admin)
     db.flush()
-    settings.write(db, {"org.name": body.org_name}, admin)
+    settings.write(db, {settings.ORG_NAME: body.org_name}, admin)
     return signed_in(db, admin, response)
 ```
 
@@ -2596,7 +2625,7 @@ v1.include_router(setup.router)
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_setup.py -v`
-Expected: `5 passed`.
+Expected: `7 passed`.
 
 **Step 5: Commit**
 
@@ -3196,6 +3225,15 @@ def test_the_name_is_needed_and_the_email_checked(admin_client):
                                            "email": "That doesn't look like an email address."}
 
 
+def test_control_characters_are_refused(admin_client):
+    r = admin_client.put("/v1/settings/org", json={**ACME, "phone": "03\u00009000 0000",
+                                                   "address": "1 Collins\u0007 Street"})
+    assert r.status_code == 422
+    assert r.json()["error"]["fields"] == {
+        "phone": "Use letters, numbers and punctuation only.",
+        "address": "Use letters, numbers and punctuation only."}
+
+
 def test_only_an_admin_changes_them(editor_client):
     assert editor_client.put("/v1/settings/org", json=ACME).status_code == 403
 
@@ -3226,7 +3264,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from sdocs.api.deps import DB, Principal, Who, require
-from sdocs.api.schemas import Name
+from sdocs.api.schemas import Name, no_control_chars
 from sdocs.services import settings
 
 router = APIRouter(prefix="/settings/org", tags=["settings"])
@@ -3250,7 +3288,7 @@ class OrgOut(BaseModel):
 
 def org_out(db) -> OrgOut:
     values = settings.read(db, settings.ORG_KEYS)
-    return OrgOut(**{f: values[f"org.{f}"] for f in FIELDS}, logo_id=values["org.logo"])
+    return OrgOut(**{f: values[f"org.{f}"] for f in FIELDS}, logo_id=values[settings.ORG_LOGO])
 
 
 def normal_abn(value: str) -> str:
@@ -3277,11 +3315,12 @@ class OrgIn(BaseModel):
     @field_validator("abn", "phone", "email", "address")
     @classmethod
     def _tidy(cls, value: str | None) -> str | None:
-        """Spaces tidied on each line, blank lines dropped; blank is None."""
+        """Spaces tidied on each line, blank lines dropped, control characters
+        refused; blank is None."""
         if value is None:
             return None
         lines = (" ".join(line.split()) for line in value.splitlines())
-        return "\n".join(line for line in lines if line) or None
+        return "\n".join(no_control_chars(line) for line in lines if line) or None
 
     @field_validator("abn")
     @classmethod
@@ -3321,7 +3360,7 @@ v1.include_router(org.router)
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_org.py -v`
-Expected: `6 passed`.
+Expected: `7 passed`.
 
 **Step 5: Commit**
 
@@ -3450,7 +3489,7 @@ def put_logo(content: Annotated[bytes, Body(media_type="image/png")], db: DB, wh
     logo = OrgLogo(mime=mime, content=content, created_by=who.user.id)
     db.add(logo)
     db.flush()
-    settings.write(db, {"org.logo": str(logo.id)}, who.user)
+    settings.write(db, {settings.ORG_LOGO: str(logo.id)}, who.user)
     db.commit()
     return Response(status_code=204)
 
@@ -3458,7 +3497,7 @@ def put_logo(content: Annotated[bytes, Body(media_type="image/png")], db: DB, wh
 @router.delete("/logo", status_code=204)
 def remove_logo(db: DB, who: Admin):
     """Back to the Simple Docs mark. The old logo's row stays."""
-    settings.write(db, {"org.logo": None}, who.user)
+    settings.write(db, {settings.ORG_LOGO: None}, who.user)
     db.commit()
     return Response(status_code=204)
 ```
@@ -3475,7 +3514,7 @@ and append:
 @router.get("/branding/logo")
 def logo(db: DB):
     """The organisation's logo. Needs no session: the sign-in page shows it."""
-    logo_id = settings.read(db, ("org.logo",))["org.logo"]
+    logo_id = settings.read(db, (settings.ORG_LOGO,))[settings.ORG_LOGO]
     row = db.get(OrgLogo, uuid.UUID(logo_id)) if logo_id else None
     if row is None:
         raise not_found("There's no logo. Simple Docs shows its own mark instead.")

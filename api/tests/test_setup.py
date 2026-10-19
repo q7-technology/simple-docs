@@ -54,3 +54,18 @@ def test_first_run_checks_what_it_is_given(client):
         "password": "Use at least 12 characters.",
     }
     assert client.get("/v1/branding").json()["setup_needed"] is True
+
+
+def test_an_install_whose_only_person_is_deactivated_stays_set_up(client, db, editor):
+    editor.active = False
+    db.commit()
+    assert client.get("/v1/branding").json()["setup_needed"] is False
+    assert client.post("/v1/setup", json=FIRST).status_code == 409
+
+
+def test_control_characters_are_refused_not_a_500(client):
+    r = client.post("/v1/setup", json={**FIRST, "org_name": "A\u0000B"})
+    assert r.status_code == 422
+    assert r.json()["error"]["fields"] == {
+        "org_name": "Use letters, numbers and punctuation only."}
+    assert client.get("/v1/branding").json()["setup_needed"] is True

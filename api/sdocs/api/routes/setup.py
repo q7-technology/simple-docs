@@ -7,6 +7,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Response
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
+from sqlalchemy.orm import Session as Db
 
 from sdocs.api.deps import DB
 from sdocs.api.errors import ApiError
@@ -25,7 +26,7 @@ class BrandingOut(BaseModel):
     logo_id: str | None
 
 
-def anyone(db) -> bool:
+def anyone(db: Db) -> bool:
     return db.execute(select(AppUser.id).limit(1)).first() is not None
 
 
@@ -33,9 +34,9 @@ def anyone(db) -> bool:
 def branding(db: DB):
     """Whether first run is needed, and the organisation's name and logo.
     Needs no session: the sign-in page shows them."""
-    org = settings.read(db, ("org.name", "org.logo"))
-    return BrandingOut(setup_needed=not anyone(db), org_name=org["org.name"],
-                       logo_id=org["org.logo"])
+    org = settings.read(db, (settings.ORG_NAME, settings.ORG_LOGO))
+    return BrandingOut(setup_needed=not anyone(db), org_name=org[settings.ORG_NAME],
+                       logo_id=org[settings.ORG_LOGO])
 
 
 class SetupIn(BaseModel):
@@ -58,5 +59,5 @@ def setup(body: SetupIn, db: DB, response: Response):
                     failed_attempts=0)
     db.add(admin)
     db.flush()
-    settings.write(db, {"org.name": body.org_name}, admin)
+    settings.write(db, {settings.ORG_NAME: body.org_name}, admin)
     return signed_in(db, admin, response)

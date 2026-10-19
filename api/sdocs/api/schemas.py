@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Annotated, Literal
 
 from pydantic import AfterValidator, Field
@@ -26,12 +27,21 @@ def new_password(value: str) -> str:
     return value
 
 
+def no_control_chars(value: str) -> str:
+    """Refuses control characters (NUL and the like), which PostgreSQL can't
+    store and nobody types. Run it after spaces are tidied: tabs and newlines
+    are control characters too."""
+    if any(unicodedata.category(c) == "Cc" for c in value):
+        raise ValueError("Use letters, numbers and punctuation only.")
+    return value
+
+
 def plain_name(value: str) -> str:
-    """Spaces tidied; never blank."""
+    """Spaces tidied; never blank; no control characters."""
     value = " ".join(value.split())
     if not value:
         raise ValueError("Can't be blank.")
-    return value
+    return no_control_chars(value)
 
 
 Username = Annotated[str, Field(max_length=200), AfterValidator(normal_username)]
