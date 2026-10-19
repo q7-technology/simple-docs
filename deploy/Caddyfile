@@ -1,0 +1,37 @@
+{
+	# Simple Docs runs on this machine, over plain http (the design): no
+	# certificates to fetch and no redirect to https.
+	auto_https off
+}
+
+:80 {
+	encode gzip
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+		X-Frame-Options DENY
+		-Server
+	}
+
+	# The API is the only door: /api/v1/... reaches it as /v1/... Step 1's
+	# bodies are JSON or a logo (the API refuses one over 512 KB); Caddy
+	# refuses anything over 1MB before it reaches the API. Later steps raise
+	# this where they take uploads.
+	handle_path /api/* {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy api:8000
+	}
+
+	# The desktop: everything else. Any route is the app's page, asked for
+	# afresh each time; the built files have hashed names and keep.
+	handle {
+		header Content-Security-Policy "default-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		@page not path /assets/* /favicon.svg
+		header @page Cache-Control "no-cache"
+		root * /srv/desktop
+		try_files {path} /index.html
+		file_server
+	}
+}

@@ -54,5 +54,27 @@ services:
   # image and DOCS_ settings as api, command `python -m sdocs.worker`, and
   # DOCS_REPO_ROOT mounted read-only like api from step 4.
 
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    # This machine only, over plain http (the design): http://localhost:8080,
+    # or DOCS_HTTP_PORT when something else has 8080.
+    ports:
+      - "127.0.0.1:${DOCS_HTTP_PORT:-8080}:80"
+    volumes:
+      # the folder, not the file: an edited Caddyfile is a new file, and a
+      # file mount would keep showing Caddy the old one
+      - ./deploy:/etc/caddy:ro
+      # the desktop, built on the host: cd apps/desktop && npm ci && npm run build
+      - ./apps/desktop/dist:/srv/desktop:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    # the API runs its migrations first: wait until it answers
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:

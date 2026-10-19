@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One run per branch: a new push cancels the one before it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api:
+    name: API
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:16
+        env:
+          POSTGRES_DB: sdocs
+          POSTGRES_USER: sdocs
+          POSTGRES_PASSWORD: sdocs
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sdocs"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      # the suite makes and drops its own databases on this server
+      TEST_DATABASE_URL: postgresql+psycopg://sdocs:sdocs@127.0.0.1:5432/sdocs_test
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install
+        # exactly what uv.lock pins; fails if the lock is out of date with pyproject.toml
+        run: uv sync --locked --extra dev -p 3.12
+      - name: Lint
+        run: .venv/bin/ruff check .
+      - name: Types
+        run: .venv/bin/mypy
+      - name: Tests
+        run: .venv/bin/pytest -q
+
+  desktop:
+    name: Desktop app
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Tests
+        run: npm test
+      - name: Types and build
+        run: npm run build
+
+  compose:
+    name: Docker Compose comes up
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Build the desktop for Caddy
+        working-directory: apps/desktop
+        run: npm ci && npm run build
+      - name: Settings a real install needs
+        run: |
+          cp .env.example .env
+          sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=ci-only-password/' .env
+      - name: Up
+        run: docker compose up -d --build
+      - name: The app answers through Caddy, and the migrations ran
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/v1/health 2>/dev/null; then ok=1; break; fi
+            sleep 2
+          done
+          test "${ok:-0}" = 1 || (docker compose logs; exit 1)
+          # a fresh install asks for its first admin
+          curl -fsS http://127.0.0.1:8080/api/v1/branding | grep -q '"setup_needed":true'
+          # the desktop is served, and any route is the app's page
+          curl -fsS http://127.0.0.1:8080/ | grep -q 'id="root"'
+          curl -fsS http://127.0.0.1:8080/settings/users | grep -q 'id="root"'
+          # a change without X-Simple-Docs is refused
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+            -d '{}' http://127.0.0.1:8080/api/v1/setup)" = 403
+          # block_change(), which later steps' append-only tables use
+          docker compose exec -T db psql -U sdocs -d sdocs -tAc \
+            "select count(*) from pg_proc where proname = 'block_change'" | grep -qx 1
+          # and app_user's guard: people are deactivated, never deleted
+          docker compose exec -T db psql -U sdocs -d sdocs -tAc \
+            "select count(*) from pg_trigger where tgname = 'app_user_never_deleted'" | grep -qx 1
+      - name: Down
+        if: always()
+        run: docker compose down -v
