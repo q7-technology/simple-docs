@@ -22,7 +22,12 @@ export default defineConfig({
       },
     },
   },
-  build: { outDir: "dist", sourcemap: false },
+  build: {
+    outDir: "dist",
+    sourcemap: false,
+    // Every asset is a file of its own: Caddy's CSP doesn't allow data: URIs.
+    assetsInlineLimit: 0,
+  },
   test: {
     environment: "jsdom",
     globals: true,

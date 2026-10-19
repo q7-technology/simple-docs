@@ -7361,6 +7361,7 @@ git commit -m "Let anyone change their own password from their account page" \
 - Create: `deploy/Caddyfile`
 - Modify: `docker-compose.yml` (add `caddy` and its volumes)
 - Create: `.github/workflows/ci.yml`
+- Modify: `apps/desktop/vite.config.ts` (`build.assetsInlineLimit: 0`)
 
 **Step 1: Write the files**
 
@@ -7384,7 +7385,9 @@ git commit -m "Let anyone change their own password from their account page" \
 	# The API is the only door: /api/v1/... reaches it as /v1/... Step 1's
 	# bodies are JSON or a logo (the API refuses one over 512 KB); Caddy
 	# refuses anything over 1MB before it reaches the API. Later steps raise
-	# this where they take uploads.
+	# this where they take uploads. The API's /docs page works on its own
+	# port (http://127.0.0.1:8044/docs) only: through here it would ask for
+	# /openapi.json from the desktop, and the CSP below blocks its scripts.
 	handle_path /api/* {
 		request_body {
 			max_size 1MB
@@ -7392,11 +7395,20 @@ git commit -m "Let anyone change their own password from their account page" \
 		reverse_proxy api:8000
 	}
 
+	# The desktop's built files have hashed names, so they keep for a year. A
+	# missing one is a 404, never the app's page.
+	handle /assets/* {
+		header Content-Security-Policy "default-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		header Cache-Control "public, max-age=31536000, immutable"
+		root * /srv/desktop
+		file_server
+	}
+
 	# The desktop: everything else. Any route is the app's page, asked for
-	# afresh each time; the built files have hashed names and keep.
+	# afresh each time.
 	handle {
 		header Content-Security-Policy "default-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
-		@page not path /assets/* /favicon.svg
+		@page not path /favicon.svg
 		header @page Cache-Control "no-cache"
 		root * /srv/desktop
 		try_files {path} /index.html
@@ -7413,7 +7425,7 @@ In `docker-compose.yml`, replace the worker comment and the `volumes:` block at 
   # DOCS_REPO_ROOT mounted read-only like api from step 4.
 
   caddy:
-    image: caddy:2
+    image: caddy:2.11.4
     restart: unless-stopped
     # This machine only, over plain http (the design): http://localhost:8080,
     # or DOCS_HTTP_PORT when something else has 8080.
@@ -7423,8 +7435,15 @@ In `docker-compose.yml`, replace the worker comment and the `volumes:` block at 
       # the folder, not the file: an edited Caddyfile is a new file, and a
       # file mount would keep showing Caddy the old one
       - ./deploy:/etc/caddy:ro
-      # the desktop, built on the host: cd apps/desktop && npm ci && npm run build
-      - ./apps/desktop/dist:/srv/desktop:ro
+      # the desktop, built on the host first: cd apps/desktop && npm ci && npm
+      # run build. Without dist, Compose stops with an error rather than
+      # creating an empty folder and serving nothing.
+      - type: bind
+        source: ./apps/desktop/dist
+        target: /srv/desktop
+        read_only: true
+        bind:
+          create_host_path: false
       - caddy_data:/data
       - caddy_config:/config
     # the API runs its migrations first: wait until it answers
@@ -7436,6 +7455,16 @@ volumes:
   pgdata:
   caddy_data:
   caddy_config:
+```
+
+In `apps/desktop/vite.config.ts`, replace the `build` line with:
+```ts
+  build: {
+    outDir: "dist",
+    sourcemap: false,
+    // Every asset is a file of its own: Caddy's CSP doesn't allow data: URIs.
+    assetsInlineLimit: 0,
+  },
 ```
 
 `.github/workflows/ci.yml`:
@@ -7452,9 +7481,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   api:
     name: API
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     services:
       db:
@@ -7492,6 +7525,7 @@ jobs:
 
   desktop:
     name: Desktop app
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -7513,6 +7547,7 @@ jobs:
 
   compose:
     name: Docker Compose comes up
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -7542,6 +7577,8 @@ jobs:
           # the desktop is served, and any route is the app's page
           curl -fsS http://127.0.0.1:8080/ | grep -q 'id="root"'
           curl -fsS http://127.0.0.1:8080/settings/users | grep -q 'id="root"'
+          # with the CSP
+          curl -sI http://127.0.0.1:8080/ | grep -qi '^content-security-policy:.*frame-ancestors'
           # a change without X-Simple-Docs is refused
           test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
             -d '{}' http://127.0.0.1:8080/api/v1/setup)" = 403
@@ -7551,6 +7588,9 @@ jobs:
           # and app_user's guard: people are deactivated, never deleted
           docker compose exec -T db psql -U sdocs -d sdocs -tAc \
             "select count(*) from pg_trigger where tgname = 'app_user_never_deleted'" | grep -qx 1
+      - name: Logs
+        if: failure()
+        run: docker compose logs
       - name: Down
         if: always()
         run: docker compose down -v
@@ -7582,7 +7622,7 @@ Open `http://localhost:8380`: the first-run page on the star field.
 **Step 4: Commit**
 
 ```
-git add deploy/Caddyfile docker-compose.yml .github/workflows/ci.yml
+git add deploy/Caddyfile docker-compose.yml .github/workflows/ci.yml apps/desktop/vite.config.ts
 git commit -m "Serve the desktop and the API through Caddy on localhost, and run CI" \
   -m "CI runs the API's tests, lint and types against Postgres, the desktop's lint, tests and build, and a Compose start that checks block_change() is there." \
   -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"

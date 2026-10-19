@@ -55,7 +55,7 @@ services:
   # DOCS_REPO_ROOT mounted read-only like api from step 4.
 
   caddy:
-    image: caddy:2
+    image: caddy:2.11.4
     restart: unless-stopped
     # This machine only, over plain http (the design): http://localhost:8080,
     # or DOCS_HTTP_PORT when something else has 8080.
@@ -65,8 +65,15 @@ services:
       # the folder, not the file: an edited Caddyfile is a new file, and a
       # file mount would keep showing Caddy the old one
       - ./deploy:/etc/caddy:ro
-      # the desktop, built on the host: cd apps/desktop && npm ci && npm run build
-      - ./apps/desktop/dist:/srv/desktop:ro
+      # the desktop, built on the host first: cd apps/desktop && npm ci && npm
+      # run build. Without dist, Compose stops with an error rather than
+      # creating an empty folder and serving nothing.
+      - type: bind
+        source: ./apps/desktop/dist
+        target: /srv/desktop
+        read_only: true
+        bind:
+          create_host_path: false
       - caddy_data:/data
       - caddy_config:/config
     # the API runs its migrations first: wait until it answers
