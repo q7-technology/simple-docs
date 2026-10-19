@@ -27,12 +27,19 @@ def new_password(value: str) -> str:
     return value
 
 
+# zero-width non-joiner and joiner
+JOINERS = frozenset("\u200c\u200d")
+
+
 def no_control_chars(value: str) -> str:
     """Refuses control characters (NUL and the like), which PostgreSQL can't
     store and nobody types, and invisible format characters (zero-width
-    spaces, direction overrides), which make text read other than it is. Run
-    it after spaces are tidied: tabs and newlines are control characters too."""
-    if any(unicodedata.category(c) in ("Cc", "Cf") for c in value):
+    spaces, direction overrides), which make text read other than it is. The
+    zero-width non-joiner and joiner stay: Persian, Indic and other scripts
+    need them in real names. Run it after spaces are tidied: tabs and newlines
+    are control characters too."""
+    if any(unicodedata.category(c) == "Cc"
+           or (unicodedata.category(c) == "Cf" and c not in JOINERS) for c in value):
         raise ValueError("Use letters, numbers and punctuation only.")
     return value
 

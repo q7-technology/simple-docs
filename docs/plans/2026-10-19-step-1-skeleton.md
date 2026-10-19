@@ -2524,12 +2524,19 @@ def new_password(value: str) -> str:
     return value
 
 
+# zero-width non-joiner and joiner
+JOINERS = frozenset("\u200c\u200d")
+
+
 def no_control_chars(value: str) -> str:
     """Refuses control characters (NUL and the like), which PostgreSQL can't
     store and nobody types, and invisible format characters (zero-width
-    spaces, direction overrides), which make text read other than it is. Run
-    it after spaces are tidied: tabs and newlines are control characters too."""
-    if any(unicodedata.category(c) in ("Cc", "Cf") for c in value):
+    spaces, direction overrides), which make text read other than it is. The
+    zero-width non-joiner and joiner stay: Persian, Indic and other scripts
+    need them in real names. Run it after spaces are tidied: tabs and newlines
+    are control characters too."""
+    if any(unicodedata.category(c) == "Cc"
+           or (unicodedata.category(c) == "Cf" and c not in JOINERS) for c in value):
         raise ValueError("Use letters, numbers and punctuation only.")
     return value
 
@@ -3384,6 +3391,12 @@ def test_an_abn_may_be_written_with_hyphens_or_dots(admin_client):
     for written in ("51-824-753-556", "51.824.753.556"):
         r = admin_client.put("/v1/settings/org", json={**ACME, "abn": written})
         assert r.json()["abn"] == "51 824 753 556"
+
+
+def test_the_joiners_real_names_need_are_kept(admin_client):
+    name = "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645 \u0915\u094d\u200d\u0937"
+    r = admin_client.put("/v1/settings/org", json={**ACME, "name": name})
+    assert r.status_code == 200 and r.json()["name"] == name
 ```
 
 **Step 2: Run it to see it fail**
@@ -3517,7 +3530,7 @@ v1.include_router(org.router)
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_org.py -v`
-Expected: `11 passed`.
+Expected: `12 passed`.
 
 **Step 5: Commit**
 
@@ -3738,7 +3751,7 @@ def logo(db: DB, if_none_match: Annotated[str | None, Header()] = None):
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_logo.py tests/test_org.py tests/test_setup.py -v`
-Expected: `29 passed`.
+Expected: `30 passed`.
 
 **Step 5: Commit**
 

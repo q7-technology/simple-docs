@@ -83,3 +83,9 @@ def test_an_abn_may_be_written_with_hyphens_or_dots(admin_client):
     for written in ("51-824-753-556", "51.824.753.556"):
         r = admin_client.put("/v1/settings/org", json={**ACME, "abn": written})
         assert r.json()["abn"] == "51 824 753 556"
+
+
+def test_the_joiners_real_names_need_are_kept(admin_client):
+    name = "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645 \u0915\u094d\u200d\u0937"
+    r = admin_client.put("/v1/settings/org", json={**ACME, "name": name})
+    assert r.status_code == 200 and r.json()["name"] == name
