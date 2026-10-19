@@ -158,3 +158,26 @@ def editor_client(editor):
 @pytest.fixture
 def reviewer_client(reviewer):
     return signed_in_client(reviewer)
+
+
+@pytest.fixture
+def beaten_to_it(engine):
+    """Another request, at the same moment, commits `row` after this one's
+    check and before its insert: arm(row, "key") waits for an object like
+    `row` with the same key to be flushed, and commits `row` first."""
+    from sqlalchemy import event
+
+    armed = []
+
+    def before_flush(session, context, instances):
+        for row, field in list(armed):
+            if any(type(o) is type(row) and getattr(o, field) == getattr(row, field)
+                   for o in [*session.new, *session.dirty] if o is not row):
+                armed.remove((row, field))
+                with Session(engine) as other:
+                    other.add(row)
+                    other.commit()
+
+    event.listen(Session, "before_flush", before_flush)
+    yield lambda row, field: armed.append((row, field))
+    event.remove(Session, "before_flush", before_flush)
