@@ -13,7 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from sdocs.api.deps import COOKIE, DB, Who
-from sdocs.api.errors import ApiError
+from sdocs.api.errors import ApiError, invalid
+from sdocs.api.schemas import NewPassword
 from sdocs.config import get_settings
 from sdocs.models import AppUser
 from sdocs.services import access, sessions
@@ -117,3 +118,21 @@ def sign_out(db: DB, token: Annotated[str | None, Cookie(alias=COOKIE)] = None):
 @router.get("/me", response_model=MeOut)
 def me(who: Who):
     return me_out(who.user)
+
+
+class OwnPasswordIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    current_password: str = Field(max_length=access.MAX_PASSWORD)
+    new_password: NewPassword
+
+
+@router.post("/password", status_code=204)
+def change_own_password(body: OwnPasswordIn, db: DB, who: Who):
+    """Your own password, with the current one. Your other sessions end; this
+    one carries on."""
+    if not access.verify_password(body.current_password, who.user.password_hash):
+        raise invalid("current_password", "That isn't your current password.")
+    who.user.password_hash = access.hash_password(body.new_password)
+    sessions.end_all(db, who.user, keep=who.session)
+    db.commit()
+    return Response(status_code=204)

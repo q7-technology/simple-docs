@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
 
@@ -118,3 +118,24 @@ def change_user(user_id: uuid.UUID, body: UserPatch, db: DB, who: Admin):
             sessions.end_all(db, user)
     db.commit()
     return user_out(user)
+
+
+class PasswordIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    password: NewPassword
+
+
+@router.post("/{user_id}/password", status_code=204)
+def set_password(user_id: uuid.UUID, body: PasswordIn, db: DB, who: Admin):
+    """A new password from an admin: it clears a lock and signs them out
+    everywhere (but this session, if it is your own)."""
+    user = db.execute(select(AppUser).where(AppUser.id == user_id)
+                      .with_for_update()).scalar_one_or_none()
+    if user is None:
+        raise no_such_user()
+    user.password_hash = access.hash_password(body.password)
+    user.failed_attempts = 0
+    user.locked_until = None
+    sessions.end_all(db, user, keep=who.session if user.id == who.user.id else None)
+    db.commit()
+    return Response(status_code=204)
