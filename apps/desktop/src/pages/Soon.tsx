@@ -23,7 +23,7 @@ export const SOON = {
   },
   clients: {
     title: "Clients", step: 2,
-    what: "Clients and their projects, each with the documents written for them, arrive in step 2. Bringing them in from monkiro follows in step 8.",
+    what: "Clients and their projects, each with the documents written for them, arrive in step 2. Importing them from the business software you already use follows in step 8.",
   },
   templates: {
     title: "Templates", step: 7,

@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { api, ApiError } from "../api/client";
+import { api, ApiError, messageOf } from "../api/client";
 import type { Branding, Me } from "../api/types";
 
 export interface SetUpForm {
@@ -20,6 +20,7 @@ interface AuthState {
   reloadBranding: () => Promise<void>;
   signIn: (username: string, password: string) => Promise<void>;
   setUp: (form: SetUpForm) => Promise<void>;
+  /** Throws, still signed in, only when Simple Docs can't be reached. */
   signOut: () => Promise<void>;
   can: (scope: string) => boolean;
 }
@@ -35,6 +36,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     api.onSignedOut = () => setMe(null);
+    return () => {
+      api.onSignedOut = null;
+    };
+  }, []);
+
+  useEffect(() => {
     let live = true;
     (async () => {
       try {
@@ -54,7 +61,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setTrouble(null);
         }
       } catch (e) {
-        if (live) setTrouble((e as Error).message);
+        if (live) setTrouble(messageOf(e));
       } finally {
         if (live) setReady(true);
       }
@@ -75,20 +82,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signIn = useCallback(async (username: string, password: string) => {
     setMe(await api.post<Me>("/v1/auth/sign-in", { username, password }));
+    setTrouble(null);
   }, []);
 
   const setUp = useCallback(async (form: SetUpForm) => {
     const admin = await api.post<Me>("/v1/setup", form);
-    // both at once, so first run hands straight over to the signed-in app
+    // all at once, so first run hands straight over to the signed-in app
     setMe(admin);
     setBranding({ setup_needed: false, org_name: form.org_name.trim(), logo_id: null });
+    setTrouble(null);
   }, []);
 
   const signOut = useCallback(async () => {
     try {
       await api.post("/v1/auth/sign-out");
-    } catch {
-      /* signed out here whatever the API says */
+    } catch (e) {
+      // Any answer from the API (signed out already, or broken) ends the
+      // session here. Unanswered, the cookie may still be good, so you stay
+      // signed in and the caller says why.
+      if (!(e instanceof ApiError)) throw e;
     }
     setMe(null);
   }, []);

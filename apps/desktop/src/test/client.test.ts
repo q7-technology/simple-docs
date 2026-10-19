@@ -1,4 +1,4 @@
-import { ApiClient, ApiError, messageOf, Unreachable } from "../api/client";
+import { ApiClient, ApiError, fieldErrorsOf, messageOf, Unreachable } from "../api/client";
 
 function json(status: number, body: unknown) {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -104,5 +104,12 @@ describe("ApiClient", () => {
     expect(messageOf(new ApiError(409, "last_admin", "Make someone else an admin first."))).toBe(
       "Make someone else an admin first.");
     expect(messageOf(new Error("boom"))).toBe("Something went wrong. Try again.");
+  });
+
+  it("picks out what is wrong with the fields a form shows, and nothing else", () => {
+    const e = new ApiError(422, "invalid", "Check the form.", { username: "Taken.", colour: "Not a colour." });
+    expect(fieldErrorsOf(e, ["username", "password"])).toEqual({ username: "Taken." });
+    expect(fieldErrorsOf(e, ["password"])).toEqual({});
+    expect(fieldErrorsOf(new Unreachable(), ["username"])).toEqual({});
   });
 });

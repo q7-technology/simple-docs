@@ -56,6 +56,7 @@ Simple WMS has `127.0.0.1:5433` (database) and `8011` (API) in its `.env`; Simpl
 - **First run asks for the organisation's name and the first admin only.** The rest of the design's first-run screen (ABN and contact details, logo, OpenRouter key check, budget) comes from Settings → Organisation now and from step 3's settings later; first run ends on Settings → Organisation. Two first runs at once make one admin (a transaction-scoped advisory lock).
 - **A locked reply says the username exists.** Five wrong passwords answer `locked`, which an unknown username never does. That is accepted, as in Simple LMS: the lock is what stops guessing, and saying nothing about it would leave the person wondering why their right password fails. A locked reply still checks the password against `DUMMY_HASH`, so it takes as long as a real attempt; and a right password whose hash was made with weaker argon2 settings than today's is hashed again (`access.needs_rehash`).
 - **The last active admin can't be demoted or deactivated, and nobody deactivates themselves.** Every active admin's row is locked in id order before the check, so two admins demoting each other at once leave one in charge.
+- **Signing out ends the session in the app whenever the API answers**, even with an error (already signed out, say, or something broken): you asked to leave, and a session the API has refused is no use to you. If the API can't be reached at all, the cookie may still be good, so you stay signed in and the page says "Couldn't sign out: Can't reach Simple Docs right now..." rather than showing sign in over a live session. Signing out again once it's back is the fix.
 - **Everyone changes their own password** (`POST /v1/auth/password`, the Account page); an admin can set anyone's (`POST /v1/users/{id}/password`), which also clears a lock. The command line (`sdocs create-user`, `sdocs set-password`) is the way back in when no admin can sign in.
 - **The ABN is checked with the ATO's checksum** and stored as `51 824 753 556`. Email is a plain shape check. Optional fields left blank are stored as null.
 - **The navbar** is the design's: Simple Docs · Documents · Clients · Templates · Spend, with Templates and Spend shown to admins only (the design's screens table), and on the right the person's name (to Account), a Settings link for admins and Sign out. The pages not built yet say when they arrive: Documents and Clients step 2, Spend step 3, Templates step 7.
@@ -4918,7 +4919,7 @@ export function CardFooter({ className, ...props }: ComponentProps<"div">) {
 
 `apps/desktop/src/ui/Field.tsx`:
 ```tsx
-import { useId, type ComponentProps, type ReactNode } from "react";
+import { useEffect, useId, type ComponentProps, type ReactNode, type RefObject } from "react";
 import { TriangleAlert } from "lucide-react";
 import { cn } from "./cn";
 
@@ -5002,6 +5003,14 @@ export function SelectField({ label, error, hint, className, children, ...props 
       {(c) => <Select {...props} {...c}>{children}</Select>}
     </Field>
   );
+}
+
+/** What is wrong is read out with the first field it is wrong in: each time
+ * `fields` changes, focus moves to the form's first invalid control. */
+export function useFocusFirstInvalid(formRef: RefObject<HTMLFormElement | null>, fields: Record<string, string>) {
+  useEffect(() => {
+    formRef.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+  }, [formRef, fields]);
 }
 ```
 
@@ -5364,7 +5373,7 @@ git commit -m "Draw a still star field, a Simple Docs mark, and the organisation
 
 `apps/desktop/src/test/client.test.ts`:
 ```ts
-import { ApiClient, ApiError, messageOf, Unreachable } from "../api/client";
+import { ApiClient, ApiError, fieldErrorsOf, messageOf, Unreachable } from "../api/client";
 
 function json(status: number, body: unknown) {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -5471,6 +5480,13 @@ describe("ApiClient", () => {
       "Make someone else an admin first.");
     expect(messageOf(new Error("boom"))).toBe("Something went wrong. Try again.");
   });
+
+  it("picks out what is wrong with the fields a form shows, and nothing else", () => {
+    const e = new ApiError(422, "invalid", "Check the form.", { username: "Taken.", colour: "Not a colour." });
+    expect(fieldErrorsOf(e, ["username", "password"])).toEqual({ username: "Taken." });
+    expect(fieldErrorsOf(e, ["password"])).toEqual({});
+    expect(fieldErrorsOf(new Unreachable(), ["username"])).toEqual({});
+  });
 });
 ```
 
@@ -5564,6 +5580,13 @@ export function messageOf(e: unknown): string {
   return e instanceof ApiError || e instanceof Unreachable ? e.message : "Something went wrong. Try again.";
 }
 
+/** What the API says is wrong with each of `names`, the fields a form shows.
+ * Empty when it named none of them, so the form says `messageOf(e)` instead. */
+export function fieldErrorsOf(e: unknown, names: readonly string[]): Record<string, string> {
+  if (!(e instanceof ApiError)) return {};
+  return Object.fromEntries(Object.entries(e.fields).filter(([name]) => names.includes(name)));
+}
+
 /** What a proxy answers when the API behind it is down or slow. */
 const GATEWAY = new Set([502, 503, 504]);
 
@@ -5644,7 +5667,7 @@ export const api = new ApiClient();
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `30 passed`.
+Expected: `31 passed`.
 
 **Step 5: Commit**
 
@@ -5669,6 +5692,7 @@ git commit -m "Give the desktop an API client: the session cookie, X-Simple-Docs
 `apps/desktop/src/test/harness.tsx`:
 ```tsx
 import { render } from "@testing-library/react";
+import { useEffect } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { AppRoutes } from "../App";
 import { AuthProvider } from "../auth/AuthContext";
@@ -5727,12 +5751,19 @@ export function stubApi(more: Handler = () => null,
   return { calls, fetchMock };
 }
 
+/** Every path the app has been at since renderApp, redirects included. */
+export const visited: string[] = [];
+
 function Where() {
   const { pathname } = useLocation();
-  return <output data-testid="where">{pathname}</output>;
+  useEffect(() => {
+    visited.push(pathname);
+  }, [pathname]);
+  return <div data-testid="where">{pathname}</div>;
 }
 
 export function renderApp(path: string) {
+  visited.length = 0;
   return render(
     <MemoryRouter initialEntries={[path]}>
       <AuthProvider>
@@ -5809,6 +5840,31 @@ describe("signing in", () => {
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
+
+  it("offers another try on the sign-in page too, rather than a form that leads back to trouble", async () => {
+    let broken = true;
+    stubApi((method, url) => {
+      if (url === "/api/v1/auth/me" && broken) return apiError(500, "internal", "Something broke on our side.");
+      if (method === "POST" && url === "/api/v1/auth/sign-in") return json(200, MEL);
+      return null;
+    }, { me: null });
+    renderApp("/sign-in");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Something broke on our side.");
+    expect(screen.queryByLabelText("Username")).toBeNull();
+    broken = false;
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await signInAs("mel", "correct horse battery");
+    await waitFor(() => expect(screen.getByTestId("where")).not.toHaveTextContent("/sign-in"));
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("says nothing about being signed out when you simply open Simple Docs", async () => {
+    stubApi(undefined, { me: null });
+    renderApp("/");
+    await screen.findByRole("heading", { level: 1, name: "Sign in" });
+    expect(screen.queryByText("You're signed out. Sign in again.")).toBeNull();
+  });
 });
 ```
 
@@ -5816,7 +5872,7 @@ describe("signing in", () => {
 ```tsx
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { ADA, apiError, FRESH, json, renderApp, stubApi } from "./harness";
+import { ACME, ADA, apiError, FRESH, json, MEL, renderApp, stubApi, visited } from "./harness";
 
 const RULE = "Use 2 to 64 letters, numbers, dots, dashes or underscores, starting with a letter or number.";
 
@@ -5853,6 +5909,7 @@ describe("first run", () => {
     await fillIn("something else entirely");
     expect(await screen.findByText("The passwords don't match.")).toBeInTheDocument();
     expect(calls.some((c) => c.url === "/api/v1/setup")).toBe(false);
+    expect(screen.getByLabelText("Password again")).toHaveFocus();
   });
 
   it("shows what the API says is wrong beside its field", async () => {
@@ -5862,12 +5919,56 @@ describe("first run", () => {
     await fillIn();
     expect(await screen.findByText(RULE)).toBeInTheDocument();
     expect(screen.getByLabelText("Username")).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText("Username")).toHaveFocus();
   });
 
   it("sends anyone to sign in once Simple Docs is set up", async () => {
     stubApi(undefined, { me: null });
     renderApp("/setup");
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("sends someone signed in who isn't an admin home", async () => {
+    stubApi(undefined, { me: MEL });
+    renderApp("/setup");
+    await waitFor(() => expect(screen.getByTestId("where")).not.toHaveTextContent("/setup"));
+    // never by way of Settings, which isn't theirs
+    expect(visited.filter((p) => p.startsWith("/settings"))).toEqual([]);
+  });
+
+  it("offers another try when Simple Docs can't be reached", async () => {
+    stubApi((_method, url) => {
+      if (url === "/api/v1/branding") throw new TypeError("Failed to fetch");
+      return null;
+    });
+    renderApp("/setup");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Can't reach Simple Docs right now.");
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Organisation")).toBeNull();
+  });
+
+  it("goes to sign in when someone else finished first run first", async () => {
+    let done = false;
+    stubApi((_method, url) => {
+      if (url === "/api/v1/setup") {
+        done = true;
+        return apiError(409, "already_set_up", "Simple Docs is already set up. Sign in instead.");
+      }
+      if (url === "/api/v1/branding" && done) return json(200, ACME);
+      return null;
+    }, { me: null, branding: FRESH });
+    renderApp("/setup");
+    await fillIn();
+    expect(await screen.findByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("says what is wrong when the API names a field this page doesn't have", async () => {
+    stubApi((_method, url) => url === "/api/v1/setup"
+      ? apiError(422, "invalid", "Something in that isn't right.", { colour: "Not a colour." }) : null,
+    { me: null, branding: FRESH });
+    renderApp("/setup");
+    await fillIn();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Something in that isn't right.");
   });
 });
 ```
@@ -5882,7 +5983,7 @@ Expected: FAIL, `Failed to resolve import "../auth/AuthContext"` (from the harne
 `apps/desktop/src/auth/AuthContext.tsx`:
 ```tsx
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { api, ApiError } from "../api/client";
+import { api, ApiError, messageOf } from "../api/client";
 import type { Branding, Me } from "../api/types";
 
 export interface SetUpForm {
@@ -5903,6 +6004,7 @@ interface AuthState {
   reloadBranding: () => Promise<void>;
   signIn: (username: string, password: string) => Promise<void>;
   setUp: (form: SetUpForm) => Promise<void>;
+  /** Throws, still signed in, only when Simple Docs can't be reached. */
   signOut: () => Promise<void>;
   can: (scope: string) => boolean;
 }
@@ -5918,6 +6020,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     api.onSignedOut = () => setMe(null);
+    return () => {
+      api.onSignedOut = null;
+    };
+  }, []);
+
+  useEffect(() => {
     let live = true;
     (async () => {
       try {
@@ -5937,7 +6045,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setTrouble(null);
         }
       } catch (e) {
-        if (live) setTrouble((e as Error).message);
+        if (live) setTrouble(messageOf(e));
       } finally {
         if (live) setReady(true);
       }
@@ -5958,20 +6066,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signIn = useCallback(async (username: string, password: string) => {
     setMe(await api.post<Me>("/v1/auth/sign-in", { username, password }));
+    setTrouble(null);
   }, []);
 
   const setUp = useCallback(async (form: SetUpForm) => {
     const admin = await api.post<Me>("/v1/setup", form);
-    // both at once, so first run hands straight over to the signed-in app
+    // all at once, so first run hands straight over to the signed-in app
     setMe(admin);
     setBranding({ setup_needed: false, org_name: form.org_name.trim(), logo_id: null });
+    setTrouble(null);
   }, []);
 
   const signOut = useCallback(async () => {
     try {
       await api.post("/v1/auth/sign-out");
-    } catch {
-      /* signed out here whatever the API says */
+    } catch (e) {
+      // Any answer from the API (signed out already, or broken) ends the
+      // session here. Unanswered, the cookie may still be good, so you stay
+      // signed in and the caller says why.
+      if (!(e instanceof ApiError)) throw e;
     }
     setMe(null);
   }, []);
@@ -6012,15 +6125,20 @@ export function AuthFrame({ children }: { children: ReactNode }) {
 
 `apps/desktop/src/auth/guards.tsx`:
 ```tsx
-import { Navigate, Outlet } from "react-router-dom";
+import { Navigate, Outlet, useLocation, type Location } from "react-router-dom";
 import { AuthFrame } from "../ui/AuthFrame";
 import { Button } from "../ui/Button";
 import { Card, CardContent } from "../ui/Card";
 import { Notice } from "../ui/Notice";
 import { useAuth } from "./AuthContext";
 
+/** What RequireAuth hands sign in: the page you were sent away from. */
+export interface SignInState {
+  from?: Location;
+}
+
 export function Loading() {
-  return <p className="relative z-10 p-6 text-body-sm text-space-gray">Loading…</p>;
+  return <p role="status" className="relative z-10 p-6 text-body-sm text-space-gray">Loading…</p>;
 }
 
 export function Trouble({ message, retry }: { message: string; retry: () => void }) {
@@ -6036,13 +6154,18 @@ export function Trouble({ message, retry }: { message: string; retry: () => void
   );
 }
 
-/** Signed in, or off to first run or sign in. */
+/** Signed in, or off to first run or sign in. Sign in is told which page you
+ * were on, to take you back there; opening Simple Docs at / says nothing. */
 export function RequireAuth() {
   const { ready, branding, me, trouble, retry } = useAuth();
+  const location = useLocation();
   if (!ready) return <Loading />;
   if (trouble) return <Trouble message={trouble} retry={retry} />;
   if (branding?.setup_needed) return <Navigate to="/setup" replace />;
-  if (!me) return <Navigate to="/sign-in" replace />;
+  if (!me) {
+    const state: SignInState | null = location.pathname === "/" ? null : { from: location };
+    return <Navigate to="/sign-in" replace state={state} />;
+  }
   return <Outlet />;
 }
 
@@ -6056,10 +6179,10 @@ export function RequireScope({ scope }: { scope: string }) {
 `apps/desktop/src/pages/SignIn.tsx`:
 ```tsx
 import { useState, type FormEvent } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import { messageOf } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
-import { Loading } from "../auth/guards";
+import { Loading, Trouble, type SignInState } from "../auth/guards";
 import { AuthFrame } from "../ui/AuthFrame";
 import { Button } from "../ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/Card";
@@ -6068,15 +6191,18 @@ import { Notice } from "../ui/Notice";
 import { OrgMark } from "../ui/OrgMark";
 
 export function SignIn() {
-  const { ready, branding, me, signIn } = useAuth();
+  const { ready, branding, me, trouble, retry, signIn } = useAuth();
+  const from = (useLocation().state as SignInState | null)?.from;
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   if (!ready) return <Loading />;
+  if (trouble) return <Trouble message={trouble} retry={retry} />;
   if (branding?.setup_needed) return <Navigate to="/setup" replace />;
-  if (me) return <Navigate to="/" replace />;
+  // back to the page you were sent away from, if any
+  if (me) return <Navigate to={from ? from.pathname + from.search : "/"} replace />;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -6100,6 +6226,7 @@ export function SignIn() {
         </CardHeader>
         <CardContent>
           <form onSubmit={submit} noValidate className="flex flex-col gap-4">
+            {from && !problem && <Notice tone="info">You're signed out. Sign in again.</Notice>}
             {problem && <Notice>{problem}</Notice>}
             <TextField label="Username" name="username" autoComplete="username" autoCapitalize="none"
                        spellCheck={false} value={username} onChange={(e) => setUsername(e.target.value)} required />
@@ -6116,33 +6243,39 @@ export function SignIn() {
 
 `apps/desktop/src/pages/SetUp.tsx`:
 ```tsx
-import { useState, type ChangeEvent, type FormEvent } from "react";
+import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { Navigate } from "react-router-dom";
-import { ApiError, messageOf } from "../api/client";
+import { ApiError, fieldErrorsOf, messageOf } from "../api/client";
 import { useAuth, type SetUpForm } from "../auth/AuthContext";
-import { Loading } from "../auth/guards";
+import { Loading, Trouble } from "../auth/guards";
 import { AuthFrame } from "../ui/AuthFrame";
 import { Button } from "../ui/Button";
 import { Card, CardContent, CardHeader } from "../ui/Card";
-import { TextField } from "../ui/Field";
+import { TextField, useFocusFirstInvalid } from "../ui/Field";
 import { Notice } from "../ui/Notice";
 import { SectionHeading } from "../ui/SectionHeading";
 import { SimpleDocsMark } from "../ui/SimpleDocsMark";
 
 const EMPTY: SetUpForm = { org_name: "", display_name: "", username: "", password: "" };
+const FIELDS = ["org_name", "display_name", "username", "password"] as const;
 
 /** First run: the organisation's name and the first admin. The rest of the
  * organisation's details wait in Settings, where first run ends. */
 export function SetUp() {
-  const { ready, branding, me, setUp } = useAuth();
+  const { ready, branding, me, trouble, retry, can, setUp, reloadBranding } = useAuth();
   const [form, setForm] = useState(EMPTY);
   const [again, setAgain] = useState("");
   const [fields, setFields] = useState<Record<string, string>>({});
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  useFocusFirstInvalid(formRef, fields);
 
   if (!ready) return <Loading />;
-  if (!branding?.setup_needed) return <Navigate to={me ? "/settings/org" : "/sign-in"} replace />;
+  if (trouble) return <Trouble message={trouble} retry={retry} />;
+  if (!branding?.setup_needed) {
+    return <Navigate to={!me ? "/sign-in" : can("settings:write") ? "/settings/org" : "/"} replace />;
+  }
 
   const set = (key: keyof SetUpForm) => (e: ChangeEvent<HTMLInputElement>) =>
     setForm({ ...form, [key]: e.target.value });
@@ -6159,9 +6292,15 @@ export function SetUp() {
     try {
       await setUp(form);
     } catch (err) {
-      if (err instanceof ApiError && Object.keys(err.fields).length > 0) setFields(err.fields);
-      else setProblem(messageOf(err));
       setBusy(false);
+      if (err instanceof ApiError && err.code === "already_set_up") {
+        // someone else finished first run first: the fresh branding sends this page to sign in
+        await reloadBranding().catch((e2: unknown) => setProblem(messageOf(e2)));
+        return;
+      }
+      const wrong = fieldErrorsOf(err, FIELDS);
+      if (Object.keys(wrong).length > 0) setFields(wrong);
+      else setProblem(messageOf(err));
     }
   }
 
@@ -6176,7 +6315,7 @@ export function SetUp() {
           </SectionHeading>
         </CardHeader>
         <CardContent>
-          <form onSubmit={submit} noValidate className="flex flex-col gap-4">
+          <form ref={formRef} onSubmit={submit} noValidate className="flex flex-col gap-4">
             {problem && <Notice>{problem}</Notice>}
             <TextField label="Organisation" hint="As your documents should name it." autoComplete="organization"
                        value={form.org_name} onChange={set("org_name")} error={fields.org_name} required />
@@ -6244,7 +6383,7 @@ export function App() {
 **Step 4: Run them to see them pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `41 passed`.
+Expected: `48 passed`.
 
 **Step 5: Commit**
 
@@ -6262,7 +6401,7 @@ git commit -m "Sign in to the desktop, and set up a fresh install from it" \
 ### Task 22: The app shell: skip link, the design's navbar, and honest empty pages
 
 **Files:**
-- Create: `apps/desktop/src/ui/Layout.tsx`
+- Create: `apps/desktop/src/ui/Layout.tsx`, `apps/desktop/src/ui/RouteFocus.tsx`
 - Create: `apps/desktop/src/pages/Soon.tsx`
 - Modify: `apps/desktop/src/App.tsx` (the routes)
 - Test: `apps/desktop/src/test/Shell.test.tsx`
@@ -6273,7 +6412,7 @@ git commit -m "Sign in to the desktop, and set up a fresh install from it" \
 ```tsx
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MEL, renderApp, stubApi } from "./harness";
+import { apiError, MEL, renderApp, stubApi } from "./harness";
 
 async function mainLinks() {
   const nav = await screen.findByRole("navigation", { name: "Main" });
@@ -6295,7 +6434,7 @@ describe("the app shell", () => {
     expect(await mainLinks()).toEqual(["Documents", "Clients", "Templates", "Spend"]);
     expect(screen.getByRole("link", { name: "Simple Docs" })).toHaveAttribute("href", "/documents");
     expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/settings");
-    expect(screen.getByRole("link", { name: /Ada Admin/ })).toHaveAttribute("href", "/account");
+    expect(screen.getByRole("link", { name: "Ada Admin, Admin: your account" })).toHaveAttribute("href", "/account");
   });
 
   it("shows an editor only what an editor can open", async () => {
@@ -6339,6 +6478,41 @@ describe("the app shell", () => {
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
     expect(calls.some((c) => c.method === "POST" && c.url === "/api/v1/auth/sign-out")).toBe(true);
   });
+
+  it("signs out here whatever the API answers", async () => {
+    stubApi((_method, url) => url === "/api/v1/auth/sign-out"
+      ? apiError(500, "internal", "Something broke on our side.") : null);
+    renderApp("/documents");
+    await userEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("keeps you signed in, and says so, when sign-out can't reach Simple Docs", async () => {
+    stubApi((_method, url) => {
+      if (url === "/api/v1/auth/sign-out") throw new TypeError("Failed to fetch");
+      return null;
+    });
+    renderApp("/documents");
+    await userEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't sign out: Can't reach Simple Docs right now.");
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    expect(screen.getByTestId("where")).toHaveTextContent("/documents");
+  });
+
+  it("moves focus to the new page's heading when you follow a link", async () => {
+    stubApi();
+    renderApp("/documents");
+    const nav = await screen.findByRole("navigation", { name: "Main" });
+    await userEvent.click(within(nav).getByRole("link", { name: "Clients" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Clients" })).toHaveFocus();
+  });
+
+  it("leaves focus alone on the first page", async () => {
+    stubApi();
+    renderApp("/documents");
+    await screen.findByRole("heading", { level: 1, name: "Documents" });
+    expect(document.body).toHaveFocus();
+  });
 });
 ```
 
@@ -6351,14 +6525,18 @@ Expected: FAIL, `Unable to find role="heading" and name "Documents"` (the placeh
 
 `apps/desktop/src/ui/Layout.tsx`:
 ```tsx
+import { useState } from "react";
 import { LogOut, Settings } from "lucide-react";
 import { Link, NavLink, Outlet } from "react-router-dom";
+import { messageOf } from "../api/client";
 import type { Role } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { Badge } from "./Badge";
 import { Button } from "./Button";
 import { cn } from "./cn";
+import { Notice } from "./Notice";
 import { OrgMark } from "./OrgMark";
+import { RouteFocus } from "./RouteFocus";
 
 export const ROLE_NAMES: Record<Role, string> = { admin: "Admin", editor: "Editor", reviewer: "Reviewer" };
 
@@ -6370,9 +6548,26 @@ export const navLink = ({ isActive }: { isActive: boolean }) =>
 
 /** The app's frame: a skip link first (the design system keeps it there),
  * then the design's navbar: Simple Docs · Documents · Clients · Templates ·
- * Spend, with you on the right. Templates and Spend are admins' screens. */
+ * Spend, with you on the right. Templates and Spend are admins' screens.
+ * On a narrow window the navbar wraps onto more rows rather than overflow,
+ * and scrolls away rather than stick over the page (sticky from sm up).
+ * Following a link moves focus to the new page's heading (RouteFocus).
+ * The skip link's padding is focus: only, because not-sr-only sets padding: 0
+ * and would otherwise win over a plain px-4 py-2. */
 export function Layout() {
   const { me, branding, can, signOut } = useAuth();
+  const [stuck, setStuck] = useState<string | null>(null);
+
+  async function leave() {
+    setStuck(null);
+    try {
+      await signOut();
+    } catch (e) {
+      // the API never answered, so the session may still be good: say so, and stay
+      setStuck(`Couldn't sign out: ${messageOf(e)}`);
+    }
+  }
+
   const links = [
     { to: "/documents", label: "Documents", show: true },
     { to: "/clients", label: "Clients", show: true },
@@ -6383,18 +6578,18 @@ export function Layout() {
     <>
       <a
         href="#main"
-        className="sr-only z-50 rounded-md bg-space-blue px-4 py-2 text-label text-space-darkBlue focus:not-sr-only focus:fixed focus:left-4 focus:top-4"
+        className="sr-only z-50 rounded-md bg-space-blue text-label text-space-darkBlue focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:px-4 focus:py-2"
       >
         Skip to main content
       </a>
-      <header className="sticky top-0 z-40 border-b border-space-blue/20 bg-space-darkBlue/80 backdrop-blur-sm">
-        <div className="mx-auto flex h-navbar max-w-shell items-center gap-6 px-4">
+      <header className="top-0 sm:sticky z-40 border-b border-space-blue/20 bg-space-darkBlue/80 backdrop-blur-sm">
+        <div className="mx-auto flex min-h-navbar max-w-shell flex-wrap items-center gap-x-6 gap-y-2 px-4 py-2">
           <Link to="/documents" className="flex items-center gap-2.5 text-subhead text-space-lightGray">
             <OrgMark logoId={branding?.logo_id ?? null} size={32} />
             Simple Docs
           </Link>
           <nav aria-label="Main">
-            <ul className="flex items-center gap-1">
+            <ul className="flex flex-wrap items-center gap-1">
               {links.filter((l) => l.show).map((l) => (
                 <li key={l.to}>
                   <NavLink to={l.to} className={navLink}>{l.label}</NavLink>
@@ -6402,9 +6597,10 @@ export function Layout() {
               ))}
             </ul>
           </nav>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex flex-wrap items-center gap-2">
             {me && (
-              <NavLink to="/account" className={navLink}>
+              <NavLink to="/account" className={navLink}
+                       aria-label={`${me.display_name}, ${ROLE_NAMES[me.role]}: your account`}>
                 {me.display_name}
                 <Badge tone="gray">{ROLE_NAMES[me.role]}</Badge>
               </NavLink>
@@ -6414,7 +6610,7 @@ export function Layout() {
                 <Settings aria-hidden="true" className="h-5 w-5" />
               </NavLink>
             )}
-            <Button variant="ghost" onClick={() => void signOut()}>
+            <Button variant="ghost" onClick={() => void leave()}>
               <LogOut aria-hidden="true" />
               Sign out
             </Button>
@@ -6422,10 +6618,45 @@ export function Layout() {
         </div>
       </header>
       <main id="main" tabIndex={-1} className="relative z-10 mx-auto max-w-shell px-4 py-10">
+        {stuck && <Notice className="mb-8">{stuck}</Notice>}
+        <RouteFocus />
         <Outlet />
       </main>
     </>
   );
+}
+```
+
+`apps/desktop/src/ui/RouteFocus.tsx`:
+```tsx
+import { useEffect, useRef } from "react";
+import { useLocation, useNavigationType } from "react-router-dom";
+
+/** After following a link, focus goes to the new page's heading (else to
+ * main), so a screen reader says where you are and Tab starts from there.
+ * The first page and a redirect (a REPLACE) leave focus alone; the heading
+ * gets tabindex=-1 so it can take focus without joining the tab order. */
+export function RouteFocus() {
+  const { pathname } = useLocation();
+  const type = useNavigationType();
+  // the last path seen rather than a "first render" flag, which StrictMode's
+  // second effect run would clear
+  const last = useRef(pathname);
+
+  useEffect(() => {
+    if (last.current === pathname) return;
+    last.current = pathname;
+    if (type === "REPLACE") return;
+    const heading = document.querySelector<HTMLElement>("#main h1");
+    if (heading) {
+      if (!heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
+      heading.focus();
+    } else {
+      document.getElementById("main")?.focus();
+    }
+  }, [pathname, type]);
+
+  return null;
 }
 ```
 
@@ -6456,7 +6687,7 @@ export const SOON = {
   },
   clients: {
     title: "Clients", step: 2,
-    what: "Clients and their projects, each with the documents written for them, arrive in step 2. Bringing them in from monkiro follows in step 8.",
+    what: "Clients and their projects, each with the documents written for them, arrive in step 2. Importing them from the business software you already use follows in step 8.",
   },
   templates: {
     title: "Templates", step: 7,
@@ -6508,12 +6739,12 @@ export function AppRoutes() {
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `50 passed`.
+Expected: `61 passed`.
 
 **Step 5: Commit**
 
 ```
-git add apps/desktop/src/ui/Layout.tsx apps/desktop/src/pages/Soon.tsx apps/desktop/src/App.tsx \
+git add apps/desktop/src/ui/Layout.tsx apps/desktop/src/ui/RouteFocus.tsx apps/desktop/src/pages/Soon.tsx apps/desktop/src/App.tsx \
   apps/desktop/src/test/Shell.test.tsx
 git commit -m "Give the desktop its shell: a skip link, the design's navbar and pages that say when they arrive" \
   -m "Templates and Spend show for admins only. Documents and Clients arrive in step 2, Spend in step 3, Templates in step 7." \
@@ -6936,7 +7167,7 @@ and add inside the `Layout` route, after the Spend route:
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `58 passed`.
+Expected: `69 passed`.
 
 **Step 5: Commit**
 
@@ -7250,7 +7481,7 @@ import { OrgSettings } from "./pages/OrgSettings";
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `65 passed`.
+Expected: `76 passed`.
 
 **Step 5: Commit**
 
@@ -7277,7 +7508,7 @@ git commit -m "Set the organisation's details and logo on the desktop, where fir
 ```tsx
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { apiError, MEL, renderApp, stubApi } from "./harness";
+import { apiError, json, MEL, renderApp, stubApi } from "./harness";
 
 async function change(current: string, next: string, again = next) {
   const form = await screen.findByRole("form", { name: "Change your password" });
@@ -7296,14 +7527,43 @@ describe("your account", () => {
     expect(screen.getByText("Signed in as mel, an editor.")).toBeInTheDocument();
   });
 
+  it("brings you back here after signing in again, saying why you were sent away", async () => {
+    stubApi((method, url) =>
+      method === "POST" && url === "/api/v1/auth/sign-in" ? json(200, MEL) : null, { me: null });
+    renderApp("/account");
+    await screen.findByRole("heading", { level: 1, name: "Sign in" });
+    expect(screen.getByRole("status")).toHaveTextContent("You're signed out. Sign in again.");
+    await userEvent.type(screen.getByLabelText("Username"), "mel");
+    await userEvent.type(screen.getByLabelText("Password"), "correct horse battery");
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Your account" })).toBeInTheDocument();
+    expect(screen.getByTestId("where")).toHaveTextContent("/account");
+  });
+
   it("changes your password with the current one", async () => {
     const { calls } = stubApi((method, url) => method === "POST" && url === "/api/v1/auth/password"
       ? new Response(null, { status: 204 }) : null, { me: MEL });
     renderApp("/account");
-    await change("correct horse battery", "a brand new password");
+    const form = await change("correct horse battery", "a brand new password");
     expect(await screen.findByRole("status")).toHaveTextContent("Password changed.");
     expect(calls.find((c) => c.url === "/api/v1/auth/password")?.body).toEqual({
       current_password: "correct horse battery", new_password: "a brand new password" });
+    expect(within(form).getByLabelText("Current password")).toHaveValue("");
+    expect(within(form).getByLabelText("New password")).toHaveValue("");
+    expect(within(form).getByLabelText("New password again")).toHaveValue("");
+  });
+
+  it("asks the browser for the current password and a new one", async () => {
+    stubApi(undefined, { me: MEL });
+    renderApp("/account");
+    const form = await screen.findByRole("form", { name: "Change your password" });
+    expect(within(form).getByLabelText("Current password")).toHaveAttribute("autocomplete", "current-password");
+    expect(within(form).getByLabelText("New password")).toHaveAttribute("autocomplete", "new-password");
+    expect(within(form).getByLabelText("New password again")).toHaveAttribute("autocomplete", "new-password");
+    // so a password manager files the new password under the right username
+    const username = form.querySelector('input[autocomplete="username"]');
+    expect(username).toHaveValue("mel");
+    expect(username).toHaveAttribute("readonly");
   });
 
   it("shows a wrong current password beside its field", async () => {
@@ -7314,6 +7574,35 @@ describe("your account", () => {
     const form = await change("nope", "a brand new password");
     expect(await within(form).findByText("That isn't your current password.")).toBeInTheDocument();
     expect(within(form).getByLabelText("Current password")).toHaveAttribute("aria-invalid", "true");
+    expect(within(form).getByLabelText("Current password")).toHaveFocus();
+  });
+
+  it("says what is wrong when the API names a field this page doesn't have", async () => {
+    stubApi((_method, url) => url === "/api/v1/auth/password"
+      ? apiError(422, "invalid", "Something in that isn't right.", { colour: "Not a colour." }) : null, { me: MEL });
+    renderApp("/account");
+    await change("correct horse battery", "a brand new password");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Something in that isn't right.");
+  });
+
+  it("shows what is wrong with the new password beside its field", async () => {
+    stubApi((_method, url) => url === "/api/v1/auth/password"
+      ? apiError(422, "invalid", "Choose a password you aren't using now.",
+                 { new_password: "Choose a password you aren't using now." }) : null, { me: MEL });
+    renderApp("/account");
+    const form = await change("correct horse battery", "correct horse battery");
+    expect(await within(form).findByText("Choose a password you aren't using now.")).toBeInTheDocument();
+    expect(within(form).getByLabelText("New password")).toHaveAttribute("aria-invalid", "true");
+  });
+
+  it("says when too many wrong tries have locked it, and keeps you here", async () => {
+    stubApi((_method, url) => url === "/api/v1/auth/password"
+      ? apiError(401, "locked", "Too many wrong passwords. Try again in 15 minutes.") : null, { me: MEL });
+    renderApp("/account");
+    await change("nope", "a brand new password");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Too many wrong passwords. Try again in 15 minutes.");
+    expect(screen.getByTestId("where")).toHaveTextContent("/account");
+    expect(screen.getByRole("form", { name: "Change your password" })).toBeInTheDocument();
   });
 
   it("checks the new passwords match before sending anything", async () => {
@@ -7322,6 +7611,7 @@ describe("your account", () => {
     await change("correct horse battery", "a brand new password", "a different one entirely");
     expect(await screen.findByText("The new passwords don't match.")).toBeInTheDocument();
     expect(calls.some((c) => c.url === "/api/v1/auth/password")).toBe(false);
+    expect(screen.getByLabelText("New password again")).toHaveFocus();
   });
 });
 ```
@@ -7335,17 +7625,18 @@ Expected: FAIL, `Unable to find role="heading" and name "Your account"` (`/accou
 
 `apps/desktop/src/pages/Account.tsx`:
 ```tsx
-import { useState, type FormEvent } from "react";
-import { api, ApiError, messageOf } from "../api/client";
+import { useRef, useState, type FormEvent } from "react";
+import { api, fieldErrorsOf, messageOf } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { Button } from "../ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/Card";
-import { TextField } from "../ui/Field";
+import { TextField, useFocusFirstInvalid } from "../ui/Field";
 import { ROLE_NAMES } from "../ui/Layout";
 import { Notice } from "../ui/Notice";
 import { SectionHeading } from "../ui/SectionHeading";
 
 const BLANK = { current_password: "", new_password: "", again: "" };
+const FIELDS = ["current_password", "new_password"] as const;
 
 export function Account() {
   const { me } = useAuth();
@@ -7354,6 +7645,8 @@ export function Account() {
   const [done, setDone] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  useFocusFirstInvalid(formRef, fields);
 
   async function save(e: FormEvent) {
     e.preventDefault();
@@ -7370,7 +7663,10 @@ export function Account() {
       setForm(BLANK);
       setDone("Password changed. You're still signed in here; anywhere else, sign in again.");
     } catch (err) {
-      if (err instanceof ApiError && Object.keys(err.fields).length > 0) setFields(err.fields);
+      // a field that is wrong is shown beside it; anything else (locked after
+      // five wrong tries, say: the session carries on) is a notice, and you stay here
+      const wrong = fieldErrorsOf(err, FIELDS);
+      if (Object.keys(wrong).length > 0) setFields(wrong);
       else setProblem(messageOf(err));
     } finally {
       setBusy(false);
@@ -7393,7 +7689,10 @@ export function Account() {
           <CardDescription>Your other sessions end; this one carries on.</CardDescription>
         </CardHeader>
         <CardContent>
-          <form onSubmit={save} noValidate aria-label="Change your password" className="flex flex-col gap-4">
+          <form ref={formRef} onSubmit={save} noValidate aria-label="Change your password" className="flex flex-col gap-4">
+            {/* for password managers, so the new password is filed under your username; hidden from everyone else */}
+            <input type="text" name="username" autoComplete="username" value={me?.username ?? ""} readOnly
+                   tabIndex={-1} aria-hidden="true" className="sr-only" />
             <TextField label="Current password" type="password" autoComplete="current-password"
                        value={form.current_password} onChange={(e) => setForm({ ...form, current_password: e.target.value })}
                        error={fields.current_password} />
@@ -7424,7 +7723,7 @@ import { Account } from "./pages/Account";
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test && npm run lint && npm run build`
-Expected: `69 passed`, no lint problems, and a build.
+Expected: `85 passed`, no lint problems, and a build.
 
 **Step 5: Commit**
 
@@ -7915,7 +8214,7 @@ Expected: `93 passed`, `All checks passed!`, `Success: no issues found`.
 **Step 2: The desktop**
 
 Run: `cd apps/desktop && npm test && npm run lint && npm run build`
-Expected: `69 passed`, no lint problems, a build in `dist/`.
+Expected: `85 passed`, no lint problems, a build in `dist/`.
 
 **Step 3: From nothing**
 

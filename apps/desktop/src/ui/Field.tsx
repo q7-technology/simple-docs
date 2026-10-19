@@ -1,4 +1,4 @@
-import { useId, type ComponentProps, type ReactNode } from "react";
+import { useEffect, useId, type ComponentProps, type ReactNode, type RefObject } from "react";
 import { TriangleAlert } from "lucide-react";
 import { cn } from "./cn";
 
@@ -82,4 +82,12 @@ export function SelectField({ label, error, hint, className, children, ...props 
       {(c) => <Select {...props} {...c}>{children}</Select>}
     </Field>
   );
+}
+
+/** What is wrong is read out with the first field it is wrong in: each time
+ * `fields` changes, focus moves to the form's first invalid control. */
+export function useFocusFirstInvalid(formRef: RefObject<HTMLFormElement | null>, fields: Record<string, string>) {
+  useEffect(() => {
+    formRef.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+  }, [formRef, fields]);
 }

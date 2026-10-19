@@ -1,6 +1,6 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { ADA, apiError, FRESH, json, renderApp, stubApi } from "./harness";
+import { ACME, ADA, apiError, FRESH, json, MEL, renderApp, stubApi, visited } from "./harness";
 
 const RULE = "Use 2 to 64 letters, numbers, dots, dashes or underscores, starting with a letter or number.";
 
@@ -54,5 +54,48 @@ describe("first run", () => {
     stubApi(undefined, { me: null });
     renderApp("/setup");
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("sends someone signed in who isn't an admin home", async () => {
+    stubApi(undefined, { me: MEL });
+    renderApp("/setup");
+    await waitFor(() => expect(screen.getByTestId("where")).not.toHaveTextContent("/setup"));
+    // never by way of Settings, which isn't theirs
+    expect(visited.filter((p) => p.startsWith("/settings"))).toEqual([]);
+  });
+
+  it("offers another try when Simple Docs can't be reached", async () => {
+    stubApi((_method, url) => {
+      if (url === "/api/v1/branding") throw new TypeError("Failed to fetch");
+      return null;
+    });
+    renderApp("/setup");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Can't reach Simple Docs right now.");
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Organisation")).toBeNull();
+  });
+
+  it("goes to sign in when someone else finished first run first", async () => {
+    let done = false;
+    stubApi((_method, url) => {
+      if (url === "/api/v1/setup") {
+        done = true;
+        return apiError(409, "already_set_up", "Simple Docs is already set up. Sign in instead.");
+      }
+      if (url === "/api/v1/branding" && done) return json(200, ACME);
+      return null;
+    }, { me: null, branding: FRESH });
+    renderApp("/setup");
+    await fillIn();
+    expect(await screen.findByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("says what is wrong when the API names a field this page doesn't have", async () => {
+    stubApi((_method, url) => url === "/api/v1/setup"
+      ? apiError(422, "invalid", "Something in that isn't right.", { colour: "Not a colour." }) : null,
+    { me: null, branding: FRESH });
+    renderApp("/setup");
+    await fillIn();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Something in that isn't right.");
   });
 });

@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import { messageOf } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
-import { Loading } from "../auth/guards";
+import { Loading, Trouble, type SignInState } from "../auth/guards";
 import { AuthFrame } from "../ui/AuthFrame";
 import { Button } from "../ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/Card";
@@ -11,15 +11,18 @@ import { Notice } from "../ui/Notice";
 import { OrgMark } from "../ui/OrgMark";
 
 export function SignIn() {
-  const { ready, branding, me, signIn } = useAuth();
+  const { ready, branding, me, trouble, retry, signIn } = useAuth();
+  const from = (useLocation().state as SignInState | null)?.from;
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   if (!ready) return <Loading />;
+  if (trouble) return <Trouble message={trouble} retry={retry} />;
   if (branding?.setup_needed) return <Navigate to="/setup" replace />;
-  if (me) return <Navigate to="/" replace />;
+  // back to the page you were sent away from, if any
+  if (me) return <Navigate to={from ? from.pathname + from.search : "/"} replace />;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -43,6 +46,7 @@ export function SignIn() {
         </CardHeader>
         <CardContent>
           <form onSubmit={submit} noValidate className="flex flex-col gap-4">
+            {from && !problem && <Notice tone="info">You're signed out. Sign in again.</Notice>}
             {problem && <Notice>{problem}</Notice>}
             <TextField label="Username" name="username" autoComplete="username" autoCapitalize="none"
                        spellCheck={false} value={username} onChange={(e) => setUsername(e.target.value)} required />

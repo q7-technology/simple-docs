@@ -1,11 +1,15 @@
+import { useState } from "react";
 import { LogOut, Settings } from "lucide-react";
 import { Link, NavLink, Outlet } from "react-router-dom";
+import { messageOf } from "../api/client";
 import type { Role } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { Badge } from "./Badge";
 import { Button } from "./Button";
 import { cn } from "./cn";
+import { Notice } from "./Notice";
 import { OrgMark } from "./OrgMark";
+import { RouteFocus } from "./RouteFocus";
 
 export const ROLE_NAMES: Record<Role, string> = { admin: "Admin", editor: "Editor", reviewer: "Reviewer" };
 
@@ -18,11 +22,25 @@ export const navLink = ({ isActive }: { isActive: boolean }) =>
 /** The app's frame: a skip link first (the design system keeps it there),
  * then the design's navbar: Simple Docs · Documents · Clients · Templates ·
  * Spend, with you on the right. Templates and Spend are admins' screens.
- * On a narrow window the navbar wraps onto more rows rather than overflow.
+ * On a narrow window the navbar wraps onto more rows rather than overflow,
+ * and scrolls away rather than stick over the page (sticky from sm up).
+ * Following a link moves focus to the new page's heading (RouteFocus).
  * The skip link's padding is focus: only, because not-sr-only sets padding: 0
  * and would otherwise win over a plain px-4 py-2. */
 export function Layout() {
   const { me, branding, can, signOut } = useAuth();
+  const [stuck, setStuck] = useState<string | null>(null);
+
+  async function leave() {
+    setStuck(null);
+    try {
+      await signOut();
+    } catch (e) {
+      // the API never answered, so the session may still be good: say so, and stay
+      setStuck(`Couldn't sign out: ${messageOf(e)}`);
+    }
+  }
+
   const links = [
     { to: "/documents", label: "Documents", show: true },
     { to: "/clients", label: "Clients", show: true },
@@ -37,7 +55,7 @@ export function Layout() {
       >
         Skip to main content
       </a>
-      <header className="sticky top-0 z-40 border-b border-space-blue/20 bg-space-darkBlue/80 backdrop-blur-sm">
+      <header className="top-0 sm:sticky z-40 border-b border-space-blue/20 bg-space-darkBlue/80 backdrop-blur-sm">
         <div className="mx-auto flex min-h-navbar max-w-shell flex-wrap items-center gap-x-6 gap-y-2 px-4 py-2">
           <Link to="/documents" className="flex items-center gap-2.5 text-subhead text-space-lightGray">
             <OrgMark logoId={branding?.logo_id ?? null} size={32} />
@@ -54,7 +72,8 @@ export function Layout() {
           </nav>
           <div className="ml-auto flex flex-wrap items-center gap-2">
             {me && (
-              <NavLink to="/account" className={navLink}>
+              <NavLink to="/account" className={navLink}
+                       aria-label={`${me.display_name}, ${ROLE_NAMES[me.role]}: your account`}>
                 {me.display_name}
                 <Badge tone="gray">{ROLE_NAMES[me.role]}</Badge>
               </NavLink>
@@ -64,7 +83,7 @@ export function Layout() {
                 <Settings aria-hidden="true" className="h-5 w-5" />
               </NavLink>
             )}
-            <Button variant="ghost" onClick={() => void signOut()}>
+            <Button variant="ghost" onClick={() => void leave()}>
               <LogOut aria-hidden="true" />
               Sign out
             </Button>
@@ -72,6 +91,8 @@ export function Layout() {
         </div>
       </header>
       <main id="main" tabIndex={-1} className="relative z-10 mx-auto max-w-shell px-4 py-10">
+        {stuck && <Notice className="mb-8">{stuck}</Notice>}
+        <RouteFocus />
         <Outlet />
       </main>
     </>

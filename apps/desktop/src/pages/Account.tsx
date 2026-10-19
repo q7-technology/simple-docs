@@ -1,14 +1,15 @@
-import { useState, type FormEvent } from "react";
-import { api, ApiError, messageOf } from "../api/client";
+import { useRef, useState, type FormEvent } from "react";
+import { api, fieldErrorsOf, messageOf } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { Button } from "../ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/Card";
-import { TextField } from "../ui/Field";
+import { TextField, useFocusFirstInvalid } from "../ui/Field";
 import { ROLE_NAMES } from "../ui/Layout";
 import { Notice } from "../ui/Notice";
 import { SectionHeading } from "../ui/SectionHeading";
 
 const BLANK = { current_password: "", new_password: "", again: "" };
+const FIELDS = ["current_password", "new_password"] as const;
 
 export function Account() {
   const { me } = useAuth();
@@ -17,6 +18,8 @@ export function Account() {
   const [done, setDone] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  useFocusFirstInvalid(formRef, fields);
 
   async function save(e: FormEvent) {
     e.preventDefault();
@@ -35,7 +38,8 @@ export function Account() {
     } catch (err) {
       // a field that is wrong is shown beside it; anything else (locked after
       // five wrong tries, say: the session carries on) is a notice, and you stay here
-      if (err instanceof ApiError && Object.keys(err.fields).length > 0) setFields(err.fields);
+      const wrong = fieldErrorsOf(err, FIELDS);
+      if (Object.keys(wrong).length > 0) setFields(wrong);
       else setProblem(messageOf(err));
     } finally {
       setBusy(false);
@@ -58,7 +62,10 @@ export function Account() {
           <CardDescription>Your other sessions end; this one carries on.</CardDescription>
         </CardHeader>
         <CardContent>
-          <form onSubmit={save} noValidate aria-label="Change your password" className="flex flex-col gap-4">
+          <form ref={formRef} onSubmit={save} noValidate aria-label="Change your password" className="flex flex-col gap-4">
+            {/* for password managers, so the new password is filed under your username; hidden from everyone else */}
+            <input type="text" name="username" autoComplete="username" value={me?.username ?? ""} readOnly
+                   tabIndex={-1} aria-hidden="true" className="sr-only" />
             <TextField label="Current password" type="password" autoComplete="current-password"
                        value={form.current_password} onChange={(e) => setForm({ ...form, current_password: e.target.value })}
                        error={fields.current_password} />

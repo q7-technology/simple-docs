@@ -61,4 +61,29 @@ describe("signing in", () => {
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
+
+  it("offers another try on the sign-in page too, rather than a form that leads back to trouble", async () => {
+    let broken = true;
+    stubApi((method, url) => {
+      if (url === "/api/v1/auth/me" && broken) return apiError(500, "internal", "Something broke on our side.");
+      if (method === "POST" && url === "/api/v1/auth/sign-in") return json(200, MEL);
+      return null;
+    }, { me: null });
+    renderApp("/sign-in");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Something broke on our side.");
+    expect(screen.queryByLabelText("Username")).toBeNull();
+    broken = false;
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await signInAs("mel", "correct horse battery");
+    await waitFor(() => expect(screen.getByTestId("where")).not.toHaveTextContent("/sign-in"));
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("says nothing about being signed out when you simply open Simple Docs", async () => {
+    stubApi(undefined, { me: null });
+    renderApp("/");
+    await screen.findByRole("heading", { level: 1, name: "Sign in" });
+    expect(screen.queryByText("You're signed out. Sign in again.")).toBeNull();
+  });
 });

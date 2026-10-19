@@ -36,6 +36,13 @@ export function messageOf(e: unknown): string {
   return e instanceof ApiError || e instanceof Unreachable ? e.message : "Something went wrong. Try again.";
 }
 
+/** What the API says is wrong with each of `names`, the fields a form shows.
+ * Empty when it named none of them, so the form says `messageOf(e)` instead. */
+export function fieldErrorsOf(e: unknown, names: readonly string[]): Record<string, string> {
+  if (!(e instanceof ApiError)) return {};
+  return Object.fromEntries(Object.entries(e.fields).filter(([name]) => names.includes(name)));
+}
+
 /** What a proxy answers when the API behind it is down or slow. */
 const GATEWAY = new Set([502, 503, 504]);
 

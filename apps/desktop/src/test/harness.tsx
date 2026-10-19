@@ -1,4 +1,5 @@
 import { render } from "@testing-library/react";
+import { useEffect } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { AppRoutes } from "../App";
 import { AuthProvider } from "../auth/AuthContext";
@@ -57,13 +58,20 @@ export function stubApi(more: Handler = () => null,
   return { calls, fetchMock };
 }
 
+/** Every path the app has been at since renderApp, redirects included. */
+export const visited: string[] = [];
+
 function Where() {
   const { pathname } = useLocation();
+  useEffect(() => {
+    visited.push(pathname);
+  }, [pathname]);
   // a div, not an output: an output is a status, and the pages under test have their own
   return <div data-testid="where">{pathname}</div>;
 }
 
 export function renderApp(path: string) {
+  visited.length = 0;
   return render(
     <MemoryRouter initialEntries={[path]}>
       <AuthProvider>

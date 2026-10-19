@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MEL, renderApp, stubApi } from "./harness";
+import { apiError, MEL, renderApp, stubApi } from "./harness";
 
 async function mainLinks() {
   const nav = await screen.findByRole("navigation", { name: "Main" });
@@ -22,7 +22,7 @@ describe("the app shell", () => {
     expect(await mainLinks()).toEqual(["Documents", "Clients", "Templates", "Spend"]);
     expect(screen.getByRole("link", { name: "Simple Docs" })).toHaveAttribute("href", "/documents");
     expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/settings");
-    expect(screen.getByRole("link", { name: /Ada Admin/ })).toHaveAttribute("href", "/account");
+    expect(screen.getByRole("link", { name: "Ada Admin, Admin: your account" })).toHaveAttribute("href", "/account");
   });
 
   it("shows an editor only what an editor can open", async () => {
@@ -65,5 +65,40 @@ describe("the app shell", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Sign out" }));
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
     expect(calls.some((c) => c.method === "POST" && c.url === "/api/v1/auth/sign-out")).toBe(true);
+  });
+
+  it("signs out here whatever the API answers", async () => {
+    stubApi((_method, url) => url === "/api/v1/auth/sign-out"
+      ? apiError(500, "internal", "Something broke on our side.") : null);
+    renderApp("/documents");
+    await userEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("keeps you signed in, and says so, when sign-out can't reach Simple Docs", async () => {
+    stubApi((_method, url) => {
+      if (url === "/api/v1/auth/sign-out") throw new TypeError("Failed to fetch");
+      return null;
+    });
+    renderApp("/documents");
+    await userEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't sign out: Can't reach Simple Docs right now.");
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    expect(screen.getByTestId("where")).toHaveTextContent("/documents");
+  });
+
+  it("moves focus to the new page's heading when you follow a link", async () => {
+    stubApi();
+    renderApp("/documents");
+    const nav = await screen.findByRole("navigation", { name: "Main" });
+    await userEvent.click(within(nav).getByRole("link", { name: "Clients" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Clients" })).toHaveFocus();
+  });
+
+  it("leaves focus alone on the first page", async () => {
+    stubApi();
+    renderApp("/documents");
+    await screen.findByRole("heading", { level: 1, name: "Documents" });
+    expect(document.body).toHaveFocus();
   });
 });
