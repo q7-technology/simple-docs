@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Header, Response
+from fastapi import APIRouter, Depends, Header, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from sdocs.api.deps import DB, Principal, Who, require
@@ -119,17 +119,34 @@ SIGNATURES = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8\xff"}
 BINARY = {"schema": {"type": "string", "format": "binary"}}
 
 
+def _too_large() -> ApiError:
+    return ApiError(413, "too_large", "The logo can be 512 KB at most.")
+
+
+async def logo_body(request: Request) -> bytes:
+    """The request's body, read only while it can still be a logo: a
+    Content-Length over the limit is refused before a byte is read, and a
+    body that runs past the limit (whatever it said) as soon as it does."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > MAX_LOGO:
+        raise _too_large()
+    content = bytearray()
+    async for chunk in request.stream():
+        content += chunk
+        if len(content) > MAX_LOGO:
+            raise _too_large()
+    return bytes(content)
+
+
 @router.put("/logo", status_code=204, openapi_extra={"requestBody": {
     "required": True, "content": {mime: BINARY for mime in SIGNATURES}}})
-def put_logo(content: Annotated[bytes, Body(media_type="image/png")], db: DB, who: Admin,
+def put_logo(db: DB, who: Admin, content: Annotated[bytes, Depends(logo_body)],
              content_type: Annotated[str | None, Header()] = None):
     """The logo is the request's body, sent as image/png or image/jpeg. SVG
     is refused: it can carry script."""
     mime = (content_type or "").split(";")[0].strip().lower()
     if mime not in SIGNATURES:
         raise ApiError(415, "unsupported_type", "Use a PNG or JPEG for the logo.")
-    if len(content) > MAX_LOGO:
-        raise ApiError(413, "too_large", "The logo can be 512 KB at most.")
     if not content.startswith(SIGNATURES[mime]):
         raise invalid("logo", "That file isn't the PNG or JPEG it says it is.")
     logo = OrgLogo(mime=mime, content=content, created_by=who.user.id)

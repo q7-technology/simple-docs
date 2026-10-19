@@ -151,8 +151,13 @@ describe("Settings → Organisation", () => {
   });
 
   it("is where first run ends", async () => {
+    let done = false;
     stubApi((method, url) => {
-      if (method === "POST" && url === "/api/v1/setup") return json(201, ADA);
+      if (method === "POST" && url === "/api/v1/setup") {
+        done = true;
+        return json(201, ADA);
+      }
+      if (done && url === "/api/v1/branding") return json(200, ACME);
       if (url === "/api/v1/settings/org") return json(200, ORG);
       return null;
     }, { me: null, branding: FRESH });

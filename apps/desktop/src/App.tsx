@@ -3,7 +3,7 @@ import { AuthProvider } from "./auth/AuthContext";
 import { RequireAuth, RequireScope } from "./auth/guards";
 import { Account } from "./pages/Account";
 import { OrgSettings } from "./pages/OrgSettings";
-import { SettingsLayout } from "./pages/Settings";
+import { SettingsHome, SettingsLayout } from "./pages/Settings";
 import { SetUp } from "./pages/SetUp";
 import { SignIn } from "./pages/SignIn";
 import { SOON, Soon } from "./pages/Soon";
@@ -30,8 +30,11 @@ export function AppRoutes() {
           </Route>
           <Route element={<RequireScope scope="settings:write" />}>
             <Route path="/settings" element={<SettingsLayout />}>
-              <Route index element={<Navigate to="/settings/users" replace />} />
-              <Route path="users" element={<Users />} />
+              <Route index element={<SettingsHome />} />
+              {/* as the API asks: Settings needs settings:write, Users users:write too */}
+              <Route element={<RequireScope scope="users:write" />}>
+                <Route path="users" element={<Users />} />
+              </Route>
               <Route path="org" element={<OrgSettings />} />
             </Route>
           </Route>

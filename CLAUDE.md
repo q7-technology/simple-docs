@@ -71,5 +71,6 @@ docker-compose.yml   db, api, caddy (the worker comes with step 3)
 - Australian English and sentence case in copy.
 
 ## Testing
-Tests never call the real OpenRouter; use the fake server. `make smoke` is the
-only live call and is never run in CI.
+Tests never call the real OpenRouter. Step 1 makes no model calls; the fake
+OpenRouter server the tests use, and `make smoke` (the only live call, never
+run in CI), arrive in step 3.

@@ -79,19 +79,22 @@ export class ApiClient {
       throw new Unreachable();
     }
     if (res.status === 204) return undefined as T;
+    // Not the API's own answer (empty, not JSON, or JSON without its error):
+    // from a gateway it means the API is down; anything else, such as
+    // Caddy's 413 for a body over its limit, is said with its status.
+    const notTheApi = () => GATEWAY.has(res.status)
+      ? new Unreachable()
+      : new ApiError(res.status, "unexpected", `Simple Docs answered ${res.status}. Try again.`);
     let parsed: unknown;
     try {
       const text = await res.text();
       parsed = text ? JSON.parse(text) : null;
     } catch {
-      // Not the API's own answer. A gateway's error page means the API is
-      // down; anything else is said with its status.
-      if (GATEWAY.has(res.status)) throw new Unreachable();
-      throw new ApiError(res.status, "unexpected", `Simple Docs answered ${res.status}. Try again.`);
+      throw notTheApi();
     }
     if (res.ok) return parsed as T;
     const error = (parsed as ErrorBody | null)?.error;
-    if (!error?.code) throw new Unreachable();
+    if (!error?.code) throw notTheApi();
     if (res.status === 401 && error.code === "signed_out") this.onSignedOut?.();
     throw new ApiError(res.status, error.code, error.message ?? `Simple Docs answered ${res.status}.`, error.fields ?? {});
   }

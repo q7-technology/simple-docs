@@ -256,6 +256,24 @@ describe("Settings → Users", () => {
     expect(screen.getByRole("link", { name: /Change it on your account page/ })).toHaveAttribute("href", "/account");
   });
 
+  it("keeps Users for those who look after users, as the API does", async () => {
+    // a role with Settings but not users:write: no Users tab, and no way in
+    const org: typeof ADA = { ...ADA, id: "u-org", role: "editor", scopes: ["settings:write"] };
+    stubApi((_method, url) => url === "/api/v1/settings/org"
+      ? json(200, { name: "Acme Pty Ltd", abn: null, phone: null, email: null, address: null, logo_id: null }) : null,
+    { me: org });
+    renderApp("/settings");
+    await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent("/settings/org"));
+    const tabs = screen.getByRole("navigation", { name: "Settings" });
+    expect(within(tabs).getAllByRole("link").map((a) => a.textContent)).toEqual(["Organisation"]);
+  });
+
+  it("sends someone without users:write away from Users", async () => {
+    stubApi(undefined, { me: { ...ADA, id: "u-org", role: "editor", scopes: ["settings:write"] } });
+    renderApp("/settings/users");
+    await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent("/documents"));
+  });
+
   it("keeps Settings for admins", async () => {
     stubApi(undefined, { me: MEL });
     renderApp("/settings/users");

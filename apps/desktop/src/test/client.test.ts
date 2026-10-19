@@ -95,6 +95,19 @@ describe("ApiClient", () => {
     await expect(client.get("/v1/health")).rejects.toMatchObject({ status: 500, code: "unexpected" });
   });
 
+  it("says what answered when the answer was empty, or JSON not in the API's shape", async () => {
+    // Caddy's own refusal of a body over its limit: a 413 with nothing in it
+    answers.push(new Response(null, { status: 413 }));
+    const e = (await client.put("/v1/settings/org/logo", new Blob(["x"])).catch((x) => x)) as ApiError;
+    expect(e).toBeInstanceOf(ApiError);
+    expect([e.status, e.code, e.message]).toEqual([413, "unexpected", "Simple Docs answered 413. Try again."]);
+    answers.push(json(400, { detail: "not ours" }));
+    await expect(client.get("/v1/health")).rejects.toMatchObject({ status: 400, code: "unexpected" });
+    // a gateway's empty answer still means the API is down
+    answers.push(new Response(null, { status: 502 }));
+    await expect(client.get("/v1/health")).rejects.toBeInstanceOf(Unreachable);
+  });
+
   it("names its errors", () => {
     expect(new ApiError(400, "x", "y").name).toBe("ApiError");
     expect(new Unreachable().name).toBe("Unreachable");

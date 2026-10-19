@@ -22,13 +22,22 @@ describe("first run", () => {
   });
 
   it("makes the first admin and signs them in", async () => {
-    const { calls } = stubApi((method, url) =>
-      method === "POST" && url === "/api/v1/setup" ? json(201, ADA) : null, { me: null, branding: FRESH });
+    let done = false;
+    const { calls } = stubApi((method, url) => {
+      if (method === "POST" && url === "/api/v1/setup") {
+        done = true;
+        return json(201, ADA);
+      }
+      return done && url === "/api/v1/branding" ? json(200, ACME) : null;
+    }, { me: null, branding: FRESH });
     renderApp("/setup");
     await fillIn();
     await waitFor(() => expect(screen.getByTestId("where")).not.toHaveTextContent("/setup"));
     expect(calls.find((c) => c.url === "/api/v1/setup")?.body).toEqual({
       org_name: "Acme Pty Ltd", display_name: "Ada Admin", username: "ada", password: "correct horse battery" });
+    // the branding is the API's, asked for once first run is done
+    const setup = calls.findIndex((c) => c.url === "/api/v1/setup");
+    expect(calls.slice(setup).some((c) => c.method === "GET" && c.url === "/api/v1/branding")).toBe(true);
   });
 
   it("checks the passwords match before sending anything", async () => {

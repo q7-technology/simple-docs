@@ -218,7 +218,9 @@ dev = ["pytest>=8", "pytest-timeout>=2.3", "httpx2>=0.1", "ruff>=0.6", "mypy>=1.
 sdocs = "sdocs.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+# pinned, so the image builds the same way each time (pip fetches it when it
+# installs the project)
+requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
@@ -529,7 +531,7 @@ TEST_DATABASE_URL = os.environ.get(
 os.environ["DOCS_DATABASE_URL"] = TEST_DATABASE_URL
 
 # A request that changes something carries this, as the desktop's does
-# (Task 8's guard).
+# (sdocs/api/guard.py).
 SAME_SITE = {"X-Simple-Docs": "1"}
 
 
@@ -3616,6 +3618,14 @@ def test_a_logo_over_512_kb_is_refused(admin_client):
     assert r.status_code == 413 and r.json()["error"]["code"] == "too_large"
 
 
+def test_a_logo_said_to_be_over_512_kb_is_refused_before_it_is_read(admin_client):
+    # the body is small: only the Content-Length could have refused it
+    r = admin_client.put("/v1/settings/org/logo", content=PNG,
+                         headers={"Content-Type": "image/png", "Content-Length": str(512 * 1024 + 1)})
+    assert r.status_code == 413
+    assert r.json() == {"error": {"code": "too_large", "message": "The logo can be 512 KB at most."}}
+
+
 def test_a_logo_of_exactly_512_kb_is_accepted(admin_client):
     exactly = PNG + b"\x00" * (512 * 1024 - len(PNG))
     assert _upload(admin_client, exactly).status_code == 204
@@ -3667,7 +3677,7 @@ Expected: FAIL, the upload answers `405` (`assert 405 == 204`) and `/v1/branding
 
 In `api/sdocs/api/routes/org.py`, change the fastapi import and add two:
 ```python
-from fastapi import APIRouter, Body, Header, Response
+from fastapi import APIRouter, Depends, Header, Request, Response
 ```
 ```python
 from sdocs.api.errors import ApiError, invalid
@@ -3685,17 +3695,34 @@ SIGNATURES = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8\xff"}
 BINARY = {"schema": {"type": "string", "format": "binary"}}
 
 
+def _too_large() -> ApiError:
+    return ApiError(413, "too_large", "The logo can be 512 KB at most.")
+
+
+async def logo_body(request: Request) -> bytes:
+    """The request's body, read only while it can still be a logo: a
+    Content-Length over the limit is refused before a byte is read, and a
+    body that runs past the limit (whatever it said) as soon as it does."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > MAX_LOGO:
+        raise _too_large()
+    content = bytearray()
+    async for chunk in request.stream():
+        content += chunk
+        if len(content) > MAX_LOGO:
+            raise _too_large()
+    return bytes(content)
+
+
 @router.put("/logo", status_code=204, openapi_extra={"requestBody": {
     "required": True, "content": {mime: BINARY for mime in SIGNATURES}}})
-def put_logo(content: Annotated[bytes, Body(media_type="image/png")], db: DB, who: Admin,
+def put_logo(db: DB, who: Admin, content: Annotated[bytes, Depends(logo_body)],
              content_type: Annotated[str | None, Header()] = None):
     """The logo is the request's body, sent as image/png or image/jpeg. SVG
     is refused: it can carry script."""
     mime = (content_type or "").split(";")[0].strip().lower()
     if mime not in SIGNATURES:
         raise ApiError(415, "unsupported_type", "Use a PNG or JPEG for the logo.")
-    if len(content) > MAX_LOGO:
-        raise ApiError(413, "too_large", "The logo can be 512 KB at most.")
     if not content.startswith(SIGNATURES[mime]):
         raise invalid("logo", "That file isn't the PNG or JPEG it says it is.")
     logo = OrgLogo(mime=mime, content=content, created_by=who.user.id)
@@ -3758,7 +3785,7 @@ def logo(db: DB, if_none_match: Annotated[str | None, Header()] = None):
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_logo.py tests/test_org.py tests/test_setup.py -v`
-Expected: `30 passed`.
+Expected: `31 passed`.
 
 **Step 5: Commit**
 
@@ -4122,7 +4149,7 @@ Expected: `14 passed`.
 
 Then the whole API, with lint and types:
 Run: `cd api && .venv/bin/pytest -q && .venv/bin/ruff check . && .venv/bin/mypy`
-Expected: `93 passed`, `All checks passed!` and `Success: no issues found in ... source files` (fix anything ruff or mypy reports before committing).
+Expected: `130 passed`, `All checks passed!` and `Success: no issues found in ... source files` (fix anything ruff or mypy reports before committing).
 
 **Step 5: Commit**
 
@@ -4222,7 +4249,7 @@ services:
         condition: service_healthy
     expose:
       - "8000"
-    # From Task 26, Caddy is the way in. Published on the host as well, on 127.0.0.1 only,
+    # Caddy is the way in. Published on the host as well, on 127.0.0.1 only,
     # for the desktop's dev server, scripts and CI.
     ports:
       - "127.0.0.1:${DOCS_API_PORT:-8044}:8000"
@@ -4263,7 +4290,7 @@ POSTGRES_PORT=5436
 DOCS_API_PORT=8044
 
 # Where Simple Docs opens: http://localhost:<DOCS_HTTP_PORT>, on this machine
-# only. Caddy publishes it from Task 26; nothing uses it before then. 8080
+# only. Caddy serves the app on this port. 8080
 # unless something else has it (Platen's web app and the Q7 site's dev server
 # do on Q7's Mac, which uses 8380).
 DOCS_HTTP_PORT=8080
@@ -5206,7 +5233,7 @@ export function LiveNotices({ said, problem, tone = "success" }: {
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `17 passed` (6 theme, 11 components).
+Expected: `18 passed` (6 theme, 12 components).
 
 Run: `cd apps/desktop && npm run build && grep -c "max-width:768px" dist/assets/*.css && grep -c "65ch" dist/assets/*.css`
 Expected: `1` then `0`: SectionHeading's `max-w-measure` is the token's 768px, and nothing built Tailwind's own 65ch `max-w-prose`.
@@ -5403,7 +5430,7 @@ export function OrgMark({ logoId, size = 32 }: { logoId: string | null; size?: n
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `21 passed`.
+Expected: `22 passed`.
 
 **Step 5: Commit**
 
@@ -5521,6 +5548,19 @@ describe("ApiClient", () => {
     expect([e.status, e.code, e.message]).toEqual([404, "unexpected", "Simple Docs answered 404. Try again."]);
     answers.push(new Response("oops", { status: 500 }));
     await expect(client.get("/v1/health")).rejects.toMatchObject({ status: 500, code: "unexpected" });
+  });
+
+  it("says what answered when the answer was empty, or JSON not in the API's shape", async () => {
+    // Caddy's own refusal of a body over its limit: a 413 with nothing in it
+    answers.push(new Response(null, { status: 413 }));
+    const e = (await client.put("/v1/settings/org/logo", new Blob(["x"])).catch((x) => x)) as ApiError;
+    expect(e).toBeInstanceOf(ApiError);
+    expect([e.status, e.code, e.message]).toEqual([413, "unexpected", "Simple Docs answered 413. Try again."]);
+    answers.push(json(400, { detail: "not ours" }));
+    await expect(client.get("/v1/health")).rejects.toMatchObject({ status: 400, code: "unexpected" });
+    // a gateway's empty answer still means the API is down
+    answers.push(new Response(null, { status: 502 }));
+    await expect(client.get("/v1/health")).rejects.toBeInstanceOf(Unreachable);
   });
 
   it("names its errors", () => {
@@ -5676,19 +5716,22 @@ export class ApiClient {
       throw new Unreachable();
     }
     if (res.status === 204) return undefined as T;
+    // Not the API's own answer (empty, not JSON, or JSON without its error):
+    // from a gateway it means the API is down; anything else, such as
+    // Caddy's 413 for a body over its limit, is said with its status.
+    const notTheApi = () => GATEWAY.has(res.status)
+      ? new Unreachable()
+      : new ApiError(res.status, "unexpected", `Simple Docs answered ${res.status}. Try again.`);
     let parsed: unknown;
     try {
       const text = await res.text();
       parsed = text ? JSON.parse(text) : null;
     } catch {
-      // Not the API's own answer. A gateway's error page means the API is
-      // down; anything else is said with its status.
-      if (GATEWAY.has(res.status)) throw new Unreachable();
-      throw new ApiError(res.status, "unexpected", `Simple Docs answered ${res.status}. Try again.`);
+      throw notTheApi();
     }
     if (res.ok) return parsed as T;
     const error = (parsed as ErrorBody | null)?.error;
-    if (!error?.code) throw new Unreachable();
+    if (!error?.code) throw notTheApi();
     if (res.status === 401 && error.code === "signed_out") this.onSignedOut?.();
     throw new ApiError(res.status, error.code, error.message ?? `Simple Docs answered ${res.status}.`, error.fields ?? {});
   }
@@ -5720,7 +5763,7 @@ export const api = new ApiClient();
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `32 passed`.
+Expected: `34 passed`.
 
 **Step 5: Commit**
 
@@ -5954,13 +5997,22 @@ describe("first run", () => {
   });
 
   it("makes the first admin and signs them in", async () => {
-    const { calls } = stubApi((method, url) =>
-      method === "POST" && url === "/api/v1/setup" ? json(201, ADA) : null, { me: null, branding: FRESH });
+    let done = false;
+    const { calls } = stubApi((method, url) => {
+      if (method === "POST" && url === "/api/v1/setup") {
+        done = true;
+        return json(201, ADA);
+      }
+      return done && url === "/api/v1/branding" ? json(200, ACME) : null;
+    }, { me: null, branding: FRESH });
     renderApp("/setup");
     await fillIn();
     await waitFor(() => expect(screen.getByTestId("where")).not.toHaveTextContent("/setup"));
     expect(calls.find((c) => c.url === "/api/v1/setup")?.body).toEqual({
       org_name: "Acme Pty Ltd", display_name: "Ada Admin", username: "ada", password: "correct horse battery" });
+    // the branding is the API's, asked for once first run is done
+    const setup = calls.findIndex((c) => c.url === "/api/v1/setup");
+    expect(calls.slice(setup).some((c) => c.method === "GET" && c.url === "/api/v1/branding")).toBe(true);
   });
 
   it("checks the passwords match before sending anything", async () => {
@@ -6142,11 +6194,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const setUp = useCallback(async (form: SetUpForm) => {
     const admin = await api.post<Me>("/v1/setup", form);
-    // all at once, so first run hands straight over to the signed-in app
+    // signed in first, then the API's own branding: once it says set up,
+    // first run hands straight over to the signed-in app
     setMe(admin);
-    setBranding({ setup_needed: false, org_name: form.org_name.trim(), logo_id: null });
     setTrouble(null);
-  }, []);
+    await reloadBranding();
+  }, [reloadBranding]);
 
   const signOut = useCallback(async () => {
     try {
@@ -6453,7 +6506,7 @@ export function App() {
 **Step 4: Run them to see them pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `49 passed`.
+Expected: `51 passed`.
 
 **Step 5: Commit**
 
@@ -6839,7 +6892,7 @@ export function AppRoutes() {
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `62 passed`.
+Expected: `65 passed`.
 
 **Step 5: Commit**
 
@@ -7122,6 +7175,24 @@ describe("Settings → Users", () => {
     expect(screen.getByRole("link", { name: /Change it on your account page/ })).toHaveAttribute("href", "/account");
   });
 
+  it("keeps Users for those who look after users, as the API does", async () => {
+    // a role with Settings but not users:write: no Users tab, and no way in
+    const org: typeof ADA = { ...ADA, id: "u-org", role: "editor", scopes: ["settings:write"] };
+    stubApi((_method, url) => url === "/api/v1/settings/org"
+      ? json(200, { name: "Acme Pty Ltd", abn: null, phone: null, email: null, address: null, logo_id: null }) : null,
+    { me: org });
+    renderApp("/settings");
+    await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent("/settings/org"));
+    const tabs = screen.getByRole("navigation", { name: "Settings" });
+    expect(within(tabs).getAllByRole("link").map((a) => a.textContent)).toEqual(["Organisation"]);
+  });
+
+  it("sends someone without users:write away from Users", async () => {
+    stubApi(undefined, { me: { ...ADA, id: "u-org", role: "editor", scopes: ["settings:write"] } });
+    renderApp("/settings/users");
+    await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent("/documents"));
+  });
+
   it("keeps Settings for admins", async () => {
     stubApi(undefined, { me: MEL });
     renderApp("/settings/users");
@@ -7139,21 +7210,24 @@ Expected: FAIL, `Unable to find role="table" and name "People who sign in"` (the
 
 `apps/desktop/src/pages/Settings.tsx` (Task 24 adds the Organisation tab):
 ```tsx
-import { NavLink, Outlet } from "react-router-dom";
+import { Navigate, NavLink, Outlet } from "react-router-dom";
+import { useAuth } from "../auth/AuthContext";
 import { SectionHeading } from "../ui/SectionHeading";
 import { navLink } from "../ui/Layout";
 
-const TABS = [{ to: "/settings/users", label: "Users" }];
+// each tab shows only to those whose role carries its scope, as its route asks
+const TABS = [{ to: "/settings/users", label: "Users", scope: "users:write" }];
 
 /** Settings, for admins: who signs in, and the organisation. Later steps add
  * models, budget and caps, ignore and redaction patterns, and connectors. */
 export function SettingsLayout() {
+  const { can } = useAuth();
   return (
     <div className="flex flex-col gap-8">
       <SectionHeading accentText="Settings" description="Who signs in, and the organisation your documents speak for." />
       <nav aria-label="Settings">
         <ul className="flex gap-1">
-          {TABS.map((t) => (
+          {TABS.filter((t) => can(t.scope)).map((t) => (
             <li key={t.to}>
               <NavLink to={t.to} className={navLink}>{t.label}</NavLink>
             </li>
@@ -7163,6 +7237,13 @@ export function SettingsLayout() {
       <Outlet />
     </div>
   );
+}
+
+/** /settings opens on the first tab you can use. */
+export function SettingsHome() {
+  const { can } = useAuth();
+  const first = TABS.find((t) => can(t.scope));
+  return <Navigate to={first?.to ?? "/"} replace />;
 }
 ```
 
@@ -7611,15 +7692,18 @@ function SetPassword({ user, onStart, onDone, onCancel }: {
 
 In `apps/desktop/src/App.tsx`, import the two pages:
 ```tsx
-import { SettingsLayout } from "./pages/Settings";
+import { SettingsHome, SettingsLayout } from "./pages/Settings";
 import { Users } from "./pages/Users";
 ```
 and add inside the `Layout` route, after the Spend route:
 ```tsx
           <Route element={<RequireScope scope="settings:write" />}>
             <Route path="/settings" element={<SettingsLayout />}>
-              <Route index element={<Navigate to="/settings/users" replace />} />
-              <Route path="users" element={<Users />} />
+              <Route index element={<SettingsHome />} />
+              {/* as the API asks: Settings needs settings:write, Users users:write too */}
+              <Route element={<RequireScope scope="users:write" />}>
+                <Route path="users" element={<Users />} />
+              </Route>
             </Route>
           </Route>
 ```
@@ -7627,7 +7711,7 @@ and add inside the `Layout` route, after the Spend route:
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `78 passed`.
+Expected: `84 passed`.
 
 **Step 5: Commit**
 
@@ -7806,8 +7890,13 @@ describe("Settings → Organisation", () => {
   });
 
   it("is where first run ends", async () => {
+    let done = false;
     stubApi((method, url) => {
-      if (method === "POST" && url === "/api/v1/setup") return json(201, ADA);
+      if (method === "POST" && url === "/api/v1/setup") {
+        done = true;
+        return json(201, ADA);
+      }
+      if (done && url === "/api/v1/branding") return json(200, ACME);
       if (url === "/api/v1/settings/org") return json(200, ORG);
       return null;
     }, { me: null, branding: FRESH });
@@ -8055,12 +8144,12 @@ export function OrgSettings() {
 In `apps/desktop/src/pages/Settings.tsx`, add the tab:
 ```tsx
 const TABS = [
-  { to: "/settings/users", label: "Users" },
-  { to: "/settings/org", label: "Organisation" },
+  { to: "/settings/users", label: "Users", scope: "users:write" },
+  { to: "/settings/org", label: "Organisation", scope: "settings:write" },
 ];
 ```
 
-In `apps/desktop/src/App.tsx`, import the page and add its route after `users`:
+In `apps/desktop/src/App.tsx`, import the page and add its route after the `users` route's `RequireScope`:
 ```tsx
 import { OrgSettings } from "./pages/OrgSettings";
 ```
@@ -8071,7 +8160,7 @@ import { OrgSettings } from "./pages/OrgSettings";
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `87 passed`.
+Expected: `95 passed`.
 
 **Step 5: Commit**
 
@@ -8312,7 +8401,7 @@ import { Account } from "./pages/Account";
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test && npm run lint && npm run build`
-Expected: `96 passed`, no lint problems, and a build.
+Expected: `104 passed`, no lint problems, and a build.
 
 **Step 5: Commit**
 
@@ -8341,6 +8430,11 @@ git commit -m "Let anyone change their own password from their account page" \
 	auto_https off
 }
 
+# The app's Content-Security-Policy: one copy, for both handle blocks below.
+(csp) {
+	header Content-Security-Policy "default-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+}
+
 :80 {
 	encode gzip
 	header {
@@ -8355,7 +8449,7 @@ git commit -m "Let anyone change their own password from their account page" \
 	# refuses anything over 1MB before it reaches the API. Later steps raise
 	# this where they take uploads. The API's /docs page works on its own
 	# port (http://127.0.0.1:8044/docs) only: through here it would ask for
-	# /openapi.json from the desktop, and the CSP below blocks its scripts.
+	# /openapi.json from the desktop, and the app's CSP blocks its scripts.
 	handle_path /api/* {
 		request_body {
 			max_size 1MB
@@ -8366,16 +8460,18 @@ git commit -m "Let anyone change their own password from their account page" \
 	# The desktop's built files have hashed names, so they keep for a year. A
 	# missing one is a 404, never the app's page.
 	handle /assets/* {
-		header Content-Security-Policy "default-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
-		header Cache-Control "public, max-age=31536000, immutable"
+		import csp
 		root * /srv/desktop
+		# only a file that exists is kept for a year: a 404 must be asked for again
+		@exists file
+		header @exists Cache-Control "public, max-age=31536000, immutable"
 		file_server
 	}
 
 	# The desktop: everything else. Any route is the app's page, asked for
 	# afresh each time.
 	handle {
-		header Content-Security-Policy "default-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		import csp
 		@page not path /favicon.svg
 		header @page Cache-Control "no-cache"
 		root * /srv/desktop
@@ -8783,6 +8879,13 @@ docker-compose.yml   db, api, caddy (the worker comes with step 3)
 - Australian English and sentence case in copy.
 ````
 
+and the text under `## Testing` with:
+```markdown
+Tests never call the real OpenRouter. Step 1 makes no model calls; the fake
+OpenRouter server the tests use, and `make smoke` (the only live call, never
+run in CI), arrive in step 3.
+```
+
 **Step 3: Commit**
 
 ```
@@ -8798,12 +8901,12 @@ git commit -m "Write the README and bring CLAUDE.md's layout up to date" \
 **Step 1: The API**
 
 Run: `cd api && .venv/bin/pytest -q && .venv/bin/ruff check . && .venv/bin/mypy`
-Expected: `93 passed`, `All checks passed!`, `Success: no issues found`.
+Expected: `130 passed`, `All checks passed!`, `Success: no issues found in 23 source files`.
 
 **Step 2: The desktop**
 
 Run: `cd apps/desktop && npm test && npm run lint && npm run build`
-Expected: `96 passed`, no lint problems, a build in `dist/`.
+Expected: `104 passed`, no lint problems, a build in `dist/`.
 
 **Step 3: From nothing**
 

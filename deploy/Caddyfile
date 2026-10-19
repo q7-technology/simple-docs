@@ -4,6 +4,11 @@
 	auto_https off
 }
 
+# The app's Content-Security-Policy: one copy, for both handle blocks below.
+(csp) {
+	header Content-Security-Policy "default-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+}
+
 :80 {
 	encode gzip
 	header {
@@ -18,7 +23,7 @@
 	# refuses anything over 1MB before it reaches the API. Later steps raise
 	# this where they take uploads. The API's /docs page works on its own
 	# port (http://127.0.0.1:8044/docs) only: through here it would ask for
-	# /openapi.json from the desktop, and the CSP below blocks its scripts.
+	# /openapi.json from the desktop, and the app's CSP blocks its scripts.
 	handle_path /api/* {
 		request_body {
 			max_size 1MB
@@ -29,7 +34,7 @@
 	# The desktop's built files have hashed names, so they keep for a year. A
 	# missing one is a 404, never the app's page.
 	handle /assets/* {
-		header Content-Security-Policy "default-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		import csp
 		root * /srv/desktop
 		# only a file that exists is kept for a year: a 404 must be asked for again
 		@exists file
@@ -40,7 +45,7 @@
 	# The desktop: everything else. Any route is the app's page, asked for
 	# afresh each time.
 	handle {
-		header Content-Security-Policy "default-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		import csp
 		@page not path /favicon.svg
 		header @page Cache-Control "no-cache"
 		root * /srv/desktop

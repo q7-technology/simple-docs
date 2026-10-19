@@ -14,7 +14,7 @@ TEST_DATABASE_URL = os.environ.get(
 os.environ["DOCS_DATABASE_URL"] = TEST_DATABASE_URL
 
 # A request that changes something carries this, as the desktop's does
-# (Task 8's guard).
+# (sdocs/api/guard.py).
 SAME_SITE = {"X-Simple-Docs": "1"}
 
 

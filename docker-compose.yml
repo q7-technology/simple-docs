@@ -38,7 +38,7 @@ services:
         condition: service_healthy
     expose:
       - "8000"
-    # From Task 26, Caddy is the way in. Published on the host as well, on 127.0.0.1 only,
+    # Caddy is the way in. Published on the host as well, on 127.0.0.1 only,
     # for the desktop's dev server, scripts and CI.
     ports:
       - "127.0.0.1:${DOCS_API_PORT:-8044}:8000"

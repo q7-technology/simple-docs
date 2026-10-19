@@ -53,6 +53,14 @@ def test_a_logo_over_512_kb_is_refused(admin_client):
     assert r.status_code == 413 and r.json()["error"]["code"] == "too_large"
 
 
+def test_a_logo_said_to_be_over_512_kb_is_refused_before_it_is_read(admin_client):
+    # the body is small: only the Content-Length could have refused it
+    r = admin_client.put("/v1/settings/org/logo", content=PNG,
+                         headers={"Content-Type": "image/png", "Content-Length": str(512 * 1024 + 1)})
+    assert r.status_code == 413
+    assert r.json() == {"error": {"code": "too_large", "message": "The logo can be 512 KB at most."}}
+
+
 def test_a_logo_of_exactly_512_kb_is_accepted(admin_client):
     exactly = PNG + b"\x00" * (512 * 1024 - len(PNG))
     assert _upload(admin_client, exactly).status_code == 204

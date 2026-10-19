@@ -98,11 +98,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const setUp = useCallback(async (form: SetUpForm) => {
     const admin = await api.post<Me>("/v1/setup", form);
-    // all at once, so first run hands straight over to the signed-in app
+    // signed in first, then the API's own branding: once it says set up,
+    // first run hands straight over to the signed-in app
     setMe(admin);
-    setBranding({ setup_needed: false, org_name: form.org_name.trim(), logo_id: null });
     setTrouble(null);
-  }, []);
+    await reloadBranding();
+  }, [reloadBranding]);
 
   const signOut = useCallback(async () => {
     try {
