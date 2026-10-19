@@ -10,6 +10,9 @@ from pydantic import AfterValidator, Field
 from sdocs.services import access
 
 USERNAME = re.compile(r"[a-z0-9][a-z0-9._-]{1,63}")
+# the longest name, as app_user.display_name holds it
+NAME_MAX = 120
+
 USERNAME_RULE = ("Use 2 to 64 letters, numbers, dots, dashes or underscores, "
                  "starting with a letter or number.")
 
@@ -54,5 +57,5 @@ def plain_name(value: str) -> str:
 
 Username = Annotated[str, Field(max_length=200), AfterValidator(normal_username)]
 NewPassword = Annotated[str, Field(max_length=access.MAX_PASSWORD), AfterValidator(new_password)]
-Name = Annotated[str, Field(max_length=120), AfterValidator(plain_name)]
+Name = Annotated[str, Field(max_length=NAME_MAX), AfterValidator(plain_name)]
 Role = Literal["admin", "editor", "reviewer"]

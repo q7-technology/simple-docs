@@ -63,6 +63,8 @@ Simple WMS has `127.0.0.1:5433` (database) and `8011` (API) in its `.env`; Simpl
 - **Buttons:** `primary` (filled `space-blue`, `space-darkBlue` text), `outline` (a `space-blue/30` hairline, light text), `ghost`, `destructive`. The design system pairs a blue fill with a gold outline, but this design keeps gold for warnings, so the second action is a blue hairline.
 - **The star field is static**: about 140 points drawn once from a seeded sequence into one `aria-hidden` SVG. Nothing on it moves, so it costs nothing and needs no reduced-motion handling of its own.
 - **Lint and types in CI from the start:** ruff and mypy for the API, ESLint and `tsc` (through `npm run build`) for the desktop, beside the tests. Playwright arrives with the first end-to-end flow worth driving (the design's sign in → handover → approved PDF).
+- **The command line never takes a password as an argument**, where it would sit in shell history and `ps`: `sdocs create-user` and `sdocs set-password` ask twice without echo, or read one line with `--password-stdin` (only the line ending stripped, spaces kept). `set-password` asks before it locks the person's row, never while holding it.
+- **The API's image runs as `sdocs` (uid 10001), never root**, on `python:3.12-slim-bookworm`, and installs exactly what `api/uv.lock` pins (committed; `uv export --frozen` with a pinned `uv` image, then `pip install --no-deps .` for the code). CI installs from the same lock with `uv sync --locked`. Notes for later steps: a named volume the API writes to needs its directory made and `chown`ed in the image before `USER sdocs`, or Docker creates it owned by root; when `git` is installed (step 4) add `git config --system --add safe.directory '*'`, since the mounted repos belong to someone else; step 4's repo mount is `${DOCS_REPO_ROOT:?set DOCS_REPO_ROOT in .env}:/repos:ro`.
 - **No worker in Compose yet.** Nothing queues until step 3; Compose has a comment where it goes. `DOCS_REPO_ROOT` is in the settings and `.env.example` now and is mounted from step 4, when something reads it.
 
 ---
@@ -2507,6 +2509,9 @@ from pydantic import AfterValidator, Field
 from sdocs.services import access
 
 USERNAME = re.compile(r"[a-z0-9][a-z0-9._-]{1,63}")
+# the longest name, as app_user.display_name holds it
+NAME_MAX = 120
+
 USERNAME_RULE = ("Use 2 to 64 letters, numbers, dots, dashes or underscores, "
                  "starting with a letter or number.")
 
@@ -2551,7 +2556,7 @@ def plain_name(value: str) -> str:
 
 Username = Annotated[str, Field(max_length=200), AfterValidator(normal_username)]
 NewPassword = Annotated[str, Field(max_length=access.MAX_PASSWORD), AfterValidator(new_password)]
-Name = Annotated[str, Field(max_length=120), AfterValidator(plain_name)]
+Name = Annotated[str, Field(max_length=NAME_MAX), AfterValidator(plain_name)]
 Role = Literal["admin", "editor", "reviewer"]
 ```
 
@@ -3768,52 +3773,169 @@ git commit -m "Keep the organisation's logo in the database, PNG or JPEG up to 5
 
 **Files:**
 - Create: `api/sdocs/cli.py`
+- Modify: `api/sdocs/api/schemas.py` (export `NAME_MAX`, used by `Name` and the command)
 - Test: `api/tests/test_cli.py`
 
 **Step 1: Write the failing test**
 
 `api/tests/test_cli.py`:
 ```python
+import getpass
+import io
+import sys
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
-
+import pytest
 from conftest import PASSWORD, fresh_client, sign_in
+from sqlalchemy import select, text
+
 from sdocs.cli import main
 from sdocs.models import AppUser
 
 NEW = "a brand new password"
 
 
-def test_create_user_makes_an_admin_who_can_sign_in(client, db, capsys):
+@pytest.fixture
+def stdin(monkeypatch):
+    """Gives the command this text on stdin, as `printf '%s\\n' "$PW" |` does."""
+    def give(text: str) -> None:
+        monkeypatch.setattr(sys, "stdin", io.StringIO(text))
+    return give
+
+
+@pytest.fixture
+def typed(monkeypatch):
+    """Answers the command's password prompts, in order, with these."""
+    def answer(*replies: str | BaseException) -> list[str]:
+        prompts: list[str] = []
+        left = iter(replies)
+
+        def ask(prompt: str = "") -> str:
+            prompts.append(prompt)
+            reply = next(left)
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
+
+        monkeypatch.setattr(getpass, "getpass", ask)
+        return prompts
+    return answer
+
+
+def test_create_user_makes_an_admin_who_can_sign_in(client, db, stdin, capsys):
+    stdin(PASSWORD + "\n")
     assert main(["create-user", "--username", "Leighton", "--name", "Leighton Lauton",
-                 "--password", PASSWORD]) == 0
+                 "--password-stdin"]) == 0
     assert "leighton created as admin" in capsys.readouterr().out
     assert sign_in(client, "leighton")["role"] == "admin"
     assert db.execute(select(AppUser.created_by)).scalar_one() is None
 
 
-def test_create_user_refuses_a_taken_username_or_a_short_password(db, editor, capsys):
+def test_create_user_refuses_a_taken_username_or_a_short_password(db, editor, stdin, capsys):
+    stdin(PASSWORD + "\n")
     assert main(["create-user", "--username", "mel", "--name", "Mel Two",
-                 "--password", PASSWORD]) == 1
+                 "--password-stdin"]) == 1
     assert "mel already exists" in capsys.readouterr().err
+    stdin("short\n")
     assert main(["create-user", "--username", "kim", "--name", "Kim Lee",
-                 "--password", "short"]) == 1
+                 "--password-stdin"]) == 1
     assert "at least 12 characters" in capsys.readouterr().err
 
 
-def test_set_password_lets_a_locked_out_person_back_in(db, editor, editor_client, capsys):
+def test_create_user_that_loses_a_race_for_the_username_says_it_exists(db, stdin, capsys,
+                                                                      beaten_to_it):
+    beaten_to_it(AppUser(username="kim", display_name="Kim Other", role="editor",
+                         password_hash="x"), "username")
+    stdin(PASSWORD + "\n")
+    assert main(["create-user", "--username", "kim", "--name", "Kim Lee",
+                 "--password-stdin"]) == 1
+    assert "kim already exists" in capsys.readouterr().err
+
+
+def test_create_user_asks_twice_when_no_password_is_piped(client, db, typed, capsys):
+    prompts = typed(PASSWORD, PASSWORD)
+    assert main(["create-user", "--username", "kim", "--name", "Kim Lee"]) == 0
+    assert prompts == ["Password: ", "Password again: "]
+    assert sign_in(client, "kim")["username"] == "kim"
+
+
+def test_create_user_refuses_passwords_that_dont_match(db, typed, capsys):
+    typed(PASSWORD, PASSWORD + "!")
+    assert main(["create-user", "--username", "kim", "--name", "Kim Lee"]) == 1
+    assert "the passwords don't match" in capsys.readouterr().err
+    assert db.execute(select(AppUser)).first() is None
+
+
+@pytest.mark.parametrize("stop", [EOFError(), KeyboardInterrupt()])
+def test_a_prompt_given_up_on_stops_quietly(db, typed, capsys, stop):
+    typed(stop)
+    assert main(["create-user", "--username", "kim", "--name", "Kim Lee"]) == 1
+    assert "no password given" in capsys.readouterr().err
+    assert db.execute(select(AppUser)).first() is None
+
+
+def test_empty_stdin_is_no_password(db, editor, stdin, capsys):
+    stdin("")
+    assert main(["set-password", "--username", "mel", "--password-stdin"]) == 1
+    assert "no password on stdin" in capsys.readouterr().err
+    stdin("\n")
+    assert main(["create-user", "--username", "kim", "--name", "Kim Lee",
+                 "--password-stdin"]) == 1
+    assert "no password on stdin" in capsys.readouterr().err
+
+
+def test_a_piped_password_keeps_its_spaces(client, db, editor, stdin, capsys):
+    stdin(NEW + "  \r\n")
+    assert main(["set-password", "--username", "mel", "--password-stdin"]) == 0
+    assert sign_in(fresh_client(), "mel", NEW + "  ")["username"] == "mel"
+    assert fresh_client().post("/v1/auth/sign-in",
+                               json={"username": "mel", "password": NEW}).status_code == 401
+
+
+def test_set_password_lets_a_locked_out_person_back_in(db, editor, editor_client, stdin, capsys):
     editor.locked_until = datetime.now(UTC) + timedelta(minutes=15)
+    editor.failed_attempts = 5
     db.commit()
-    assert main(["set-password", "--username", "MEL", "--password", NEW]) == 0
+    stdin(NEW + "\n")
+    assert main(["set-password", "--username", "MEL", "--password-stdin"]) == 0
     assert "mel's password is set" in capsys.readouterr().out
     assert editor_client.get("/v1/auth/me").status_code == 401
     assert sign_in(fresh_client(), "mel", NEW)["username"] == "mel"
 
 
-def test_set_password_for_nobody_says_so(db, capsys):
-    assert main(["set-password", "--username", "nobody", "--password", NEW]) == 1
+def test_set_password_asks_twice_when_no_password_is_piped(db, editor, typed, capsys):
+    prompts = typed(NEW, NEW)
+    assert main(["set-password", "--username", "mel"]) == 0
+    assert prompts == ["Password: ", "Password again: "]
+    assert sign_in(fresh_client(), "mel", NEW)["username"] == "mel"
+
+
+def test_set_password_for_nobody_says_so_before_asking(db, typed, capsys):
+    prompts = typed(NEW, NEW)
+    assert main(["set-password", "--username", "nobody"]) == 1
     assert "there's no user nobody" in capsys.readouterr().err
+    assert prompts == []
+
+
+def test_set_password_doesnt_hold_the_row_while_asking(db, editor, engine, monkeypatch,
+                                                       capsys):
+    # while the prompt waits, someone else can still change the person's row
+    def ask_and_meanwhile_update(prompt: str = "") -> str:
+        with engine.connect() as other:
+            other.execute(text("set lock_timeout = '2s'"))
+            other.execute(text("update app_user set failed_attempts = 1 where username = 'mel'"))
+            other.commit()
+        return NEW
+
+    monkeypatch.setattr(getpass, "getpass", ask_and_meanwhile_update)
+    assert main(["set-password", "--username", "mel"]) == 0
+    db.expire_all()
+    assert db.get(AppUser, editor.id).failed_attempts == 0
+
+
+def test_password_is_not_an_argument(capsys):
+    with pytest.raises(SystemExit):
+        main(["set-password", "--username", "mel", "--password", NEW])
 ```
 
 **Step 2: Run it to see it fail**
@@ -3827,7 +3949,16 @@ Expected: ERROR collecting, `ModuleNotFoundError: No module named 'sdocs.cli'`.
 ```python
 """The sdocs command, for what has to happen outside the app: `create-user`
 for an install set up by script, and `set-password`, the way back in when
-nobody can sign in as an admin. In Compose: docker compose exec api sdocs ..."""
+nobody can sign in as an admin.
+
+A password is never an argument, where it would sit in the shell's history
+and in `ps`. The command asks for it twice, or, with --password-stdin, reads
+one line from stdin. In Compose:
+
+    docker compose exec api sdocs set-password --username mel
+    printf '%s\\n' "$PW" |
+      docker compose exec -T api sdocs set-password --username mel --password-stdin
+"""
 from __future__ import annotations
 
 import argparse
@@ -3835,11 +3966,14 @@ import getpass
 import sys
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
-from sdocs.api.schemas import USERNAME_RULE, normal_username
+from sdocs.api.schemas import NAME_MAX, USERNAME_RULE, new_password, normal_username, plain_name
 from sdocs.db import get_sessionmaker
 from sdocs.models import ROLES, AppUser
 from sdocs.services import access, sessions
+
+USERNAME_TAKEN = "uq_app_user_username"
 
 
 def _say(problem: str) -> None:
@@ -3854,55 +3988,95 @@ def _username(text: str) -> str | None:
         return None
 
 
-def _password(given: str | None) -> str | None:
-    """The password given, or asked for twice; None, with the reason said, if it won't do."""
-    password = given
-    if not password:
-        password = getpass.getpass("Password: ")
-        if getpass.getpass("Password again: ") != password:
+def _name(text: str) -> str | None:
+    """Their name, checked as the API checks it; None, with the reason said, if it won't do."""
+    try:
+        name = plain_name(text)
+    except ValueError as e:
+        _say(f"--name won't do. {e}")
+        return None
+    if len(name) > NAME_MAX:
+        _say(f"--name won't do. Use at most {NAME_MAX} characters.")
+        return None
+    return name
+
+
+def _password(from_stdin: bool) -> str | None:
+    """One line from stdin, or asked for twice; None, with the reason said, if it won't do."""
+    if from_stdin:
+        # only the line ending goes: spaces are part of a password
+        password = sys.stdin.readline().rstrip("\r\n")
+        if not password:
+            _say("no password on stdin")
+            return None
+    else:
+        try:
+            password = getpass.getpass("Password: ")
+            again = getpass.getpass("Password again: ")
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            _say("no password given")
+            return None
+        if again != password:
             _say("the passwords don't match")
             return None
-    if len(password) < access.MIN_PASSWORD:
-        _say(f"the password needs at least {access.MIN_PASSWORD} characters")
+    if len(password) > access.MAX_PASSWORD:
+        _say(f"the password won't do. Use at most {access.MAX_PASSWORD} characters.")
         return None
-    return password
+    try:
+        return new_password(password)
+    except ValueError as e:
+        _say(f"the password won't do. {e}")
+        return None
 
 
-def cmd_create_user(args) -> int:
+def cmd_create_user(args: argparse.Namespace) -> int:
     username = _username(args.username)
-    name = " ".join(args.name.split())
-    if not name:
-        _say("--name can't be blank")
+    name = _name(args.name)
+    if username is None or name is None:
         return 1
-    password = _password(args.password) if username else None
-    if username is None or password is None:
+    password = _password(args.password_stdin)
+    if password is None:
         return 1
+    password_hash = access.hash_password(password)
     with get_sessionmaker()() as db:
         if db.execute(select(AppUser.id).where(AppUser.username == username)).first():
             _say(f"{username} already exists")
             return 1
         db.add(AppUser(username=username, display_name=name, role=args.role,
-                       password_hash=access.hash_password(password), active=True,
-                       failed_attempts=0))
-        db.commit()
+                       password_hash=password_hash, active=True, failed_attempts=0))
+        try:
+            db.commit()
+        except IntegrityError as e:
+            # someone took the username between the check and the commit
+            db.rollback()
+            if getattr(getattr(e.orig, "diag", None), "constraint_name", None) != USERNAME_TAKEN:
+                raise
+            _say(f"{username} already exists")
+            return 1
     print(f"{username} created as {args.role}")
     return 0
 
 
-def cmd_set_password(args) -> int:
+def cmd_set_password(args: argparse.Namespace) -> int:
     username = _username(args.username)
     if username is None:
         return 1
+    find = select(AppUser).where(AppUser.username == username)
+    # say there's nobody before asking for anything, but hold no lock (nor a
+    # transaction) while the prompt waits
     with get_sessionmaker()() as db:
-        user = db.execute(select(AppUser).where(AppUser.username == username)
-                          .with_for_update()).scalar_one_or_none()
-        if user is None:
-            _say(f"there's no user {username}")
-            return 1
-        password = _password(args.password)
-        if password is None:
-            return 1
-        user.password_hash = access.hash_password(password)
+        exists = db.execute(find).scalar_one_or_none() is not None
+    if not exists:
+        _say(f"there's no user {username}")
+        return 1
+    password = _password(args.password_stdin)
+    if password is None:
+        return 1
+    password_hash = access.hash_password(password)
+    with get_sessionmaker()() as db:
+        user = db.execute(find.with_for_update()).scalar_one()
+        user.password_hash = password_hash
         user.failed_attempts = 0
         user.locked_until = None
         sessions.end_all(db, user)
@@ -3914,23 +4088,25 @@ def cmd_set_password(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="sdocs")
     sub = parser.add_subparsers(dest="command", required=True)
+    stdin_help = ("read the password from one line of stdin instead of asking for it, "
+                  "e.g. printf '%%s\\n' \"$PW\" | sdocs ... --password-stdin")
 
     p = sub.add_parser("create-user", help="add someone who signs in (an admin unless told)")
     p.add_argument("--username", required=True)
     p.add_argument("--name", required=True, help="their name as Simple Docs shows it")
     p.add_argument("--role", default="admin", choices=ROLES)
-    p.add_argument("--password", help="asked for if left out, which keeps it out of your "
-                                      "shell's history")
+    p.add_argument("--password-stdin", action="store_true", help=stdin_help)
     p.set_defaults(func=cmd_create_user)
 
     p = sub.add_parser("set-password",
                        help="give someone a new password, clear a lock and end their sessions")
     p.add_argument("--username", required=True)
-    p.add_argument("--password", help="asked for if left out")
+    p.add_argument("--password-stdin", action="store_true", help=stdin_help)
     p.set_defaults(func=cmd_set_password)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    result: int = args.func(args)
+    return result
 
 
 if __name__ == "__main__":
@@ -3940,7 +4116,7 @@ if __name__ == "__main__":
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_cli.py -v`
-Expected: `4 passed`.
+Expected: `14 passed`.
 
 Then the whole API, with lint and types:
 Run: `cd api && .venv/bin/pytest -q && .venv/bin/ruff check . && .venv/bin/mypy`
@@ -3949,7 +4125,7 @@ Expected: `93 passed`, `All checks passed!` and `Success: no issues found in ...
 **Step 5: Commit**
 
 ```
-git add api/sdocs/cli.py api/tests/test_cli.py
+git add api/sdocs/cli.py api/sdocs/api/schemas.py api/tests/test_cli.py
 git commit -m "Add sdocs create-user and sdocs set-password" \
   -m "set-password is the way back in when nobody can sign in as an admin." \
   -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -3961,6 +4137,7 @@ git commit -m "Add sdocs create-user and sdocs set-password" \
 
 **Files:**
 - Create: `api/Dockerfile`
+- Commit: `api/uv.lock` (made by `uv lock` in `api/`; the image installs exactly what it pins)
 - Modify: `docker-compose.yml` (add `api`)
 - Modify: `.env.example` (replace with the full file)
 
@@ -3968,20 +4145,34 @@ git commit -m "Add sdocs create-user and sdocs set-password" \
 
 `api/Dockerfile`:
 ```dockerfile
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PIP_ROOT_USER_ACTION=ignore
+
+# uv, pinned, only to turn uv.lock into a requirements list
+COPY --from=ghcr.io/astral-sh/uv:0.12.9 /uv /usr/local/bin/uv
+
+# the API runs as this person, never as root
+RUN useradd --system --uid 10001 --user-group --create-home --home-dir /home/sdocs \
+    --shell /usr/sbin/nologin sdocs
 
 WORKDIR /app
 
-COPY pyproject.toml ./
+# the packages first, exactly as uv.lock pins them, so a code change reuses this layer
+COPY pyproject.toml uv.lock ./
+RUN uv export --frozen --no-dev --no-hashes --no-emit-project -o /tmp/requirements.txt \
+    && pip install --no-cache-dir -r /tmp/requirements.txt \
+    && rm -rf /tmp/requirements.txt /root/.cache
+
 COPY sdocs ./sdocs
 COPY alembic.ini ./
 COPY alembic ./alembic
+RUN pip install --no-cache-dir --no-deps . && rm -rf /root/.cache
 
-RUN pip install --no-cache-dir . && rm -rf /root/.cache
+USER sdocs
 
 EXPOSE 8000
 CMD ["uvicorn", "sdocs.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -4012,8 +4203,9 @@ services:
   api:
     build: ./api
     restart: unless-stopped
-    # migrations run on every start, before the API takes requests
-    command: sh -c "alembic upgrade head && uvicorn sdocs.api.app:app --host 0.0.0.0 --port 8000"
+    # migrations run on every start, before the API takes requests; exec makes
+    # uvicorn PID 1, so `docker compose stop` reaches it and it stops at once
+    command: sh -c "alembic upgrade head && exec uvicorn sdocs.api.app:app --host 0.0.0.0 --port 8000"
     environment:
       DOCS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-sdocs}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-sdocs}
       DOCS_COOKIE_SECURE: ${DOCS_COOKIE_SECURE:-false}
@@ -4028,12 +4220,12 @@ services:
         condition: service_healthy
     expose:
       - "8000"
-    # Caddy is the way in. Published on the host as well, on 127.0.0.1 only,
+    # From Task 26, Caddy is the way in. Published on the host as well, on 127.0.0.1 only,
     # for the desktop's dev server, scripts and CI.
     ports:
       - "127.0.0.1:${DOCS_API_PORT:-8044}:8000"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/v1/health')\""]
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/v1/health', timeout=3)\""]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -4055,6 +4247,8 @@ volumes:
 # Postgres (used by the db and api containers)
 POSTGRES_DB=sdocs
 POSTGRES_USER=sdocs
+# Letters and digits (and - . _ ~) only: it goes into the API's database URL
+# as it is, so anything else would have to be URL-encoded there.
 POSTGRES_PASSWORD=change-me
 # Host port the database is published on (127.0.0.1 only). 5436 sits beside
 # Simple WMS's 5433, Simple TMS's 5434 and Simple LMS's 5435. The tests expect
@@ -4067,8 +4261,9 @@ POSTGRES_PORT=5436
 DOCS_API_PORT=8044
 
 # Where Simple Docs opens: http://localhost:<DOCS_HTTP_PORT>, on this machine
-# only. 8080 unless something else has it (Platen's web app and the Q7 site's
-# dev server do on Q7's Mac, which uses 8380).
+# only. Caddy publishes it from Task 26; nothing uses it before then. 8080
+# unless something else has it (Platen's web app and the Q7 site's dev server
+# do on Q7's Mac, which uses 8380).
 DOCS_HTTP_PORT=8080
 
 # The session cookie's Secure flag. Leave false for http://localhost; set
@@ -4112,10 +4307,16 @@ Expected: `1`
 Run: `docker compose exec -T api sdocs --help`
 Expected: usage naming `create-user` and `set-password`.
 
+Run: `docker compose exec -T api id`
+Expected: `uid=10001(sdocs)`, never root.
+
+Run: `time docker compose stop api && docker compose start api`
+Expected: it stops in about a second (uvicorn is PID 1 and gets the signal), not after Docker's 10 second wait.
+
 **Step 4: Commit**
 
 ```
-git add api/Dockerfile docker-compose.yml .env.example
+git add api/Dockerfile api/uv.lock docker-compose.yml .env.example
 git commit -m "Run the API in Compose, its migrations first, on 127.0.0.1:8044" \
   -m "The worker's place is marked for step 3; DOCS_REPO_ROOT is mounted from step 4." \
   -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -7280,7 +7481,8 @@ jobs:
         with:
           enable-cache: true
       - name: Install
-        run: uv venv -p 3.12 && uv pip install -e ".[dev]"
+        # exactly what uv.lock pins; fails if the lock is out of date with pyproject.toml
+        run: uv sync --locked --extra dev -p 3.12
       - name: Lint
         run: .venv/bin/ruff check .
       - name: Types
@@ -7469,8 +7671,9 @@ docker compose exec api sdocs set-password --username <your username>
 ```
 
 It asks for the new password twice, clears any lock and ends that person's
-sessions. `sdocs create-user` adds someone (an admin unless `--role` says
-otherwise).
+sessions. From a script, pipe it in instead (a password is never an argument):
+`printf '%s\n' "$PW" | docker compose exec -T api sdocs set-password --username <you> --password-stdin`.
+`sdocs create-user` adds someone (an admin unless `--role` says otherwise).
 
 ## The API from a script
 
