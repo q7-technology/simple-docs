@@ -47,13 +47,14 @@ Simple WMS has `127.0.0.1:5433` (database) and `8011` (API) in its `.env`; Simpl
 - **The session lives in the cookie only.** `sdocs_session`, httpOnly, SameSite=Strict, `Path=/`, `Secure` when `DOCS_COOKIE_SECURE=true` (off by default, because the design serves plain `http://localhost:8080`). Sign-in answers with the person, never the token, so no script on the page can read it. A script uses a cookie jar (`curl -c jar -b jar`), so rule 4 holds. Token `sdocs_s.` + 32 random bytes; 12 hours idle (sliding), 14 days in all; `last_seen_at` written at most once a minute. A new password ends that person's other sessions; deactivation ends all of them.
 - **Requests that change something carry `X-Simple-Docs: 1`.** SameSite=Strict stops other sites, but every other app on `localhost` counts as the same site. A page can't add a custom header to a cross-origin request without a CORS preflight, which this API never answers, so the header closes that gap. Reads need no header. The desktop's client always sends it.
 - **The API is at `/v1/...`; Caddy serves it at `/api/v1/...`** (`handle_path /api/*`, as the design's "proxies `/api`"), and Vite's dev proxy does the same. `/docs` (FastAPI's page) is on the API's own port only.
-- **Scopes:** reviewer `documents:read`, `clients:read`, `reviews:write`; editor `documents:read`, `documents:write`, `clients:read`, `clients:write`; admin `*`. Users, settings, templates and spend are admin-only and need no scope of their own beyond `*`. Step 1 checks `users:read`, `users:write`, `settings:write`; later steps check the rest and may add to the lists.
+- **Scopes:** reviewer `documents:read`, `clients:read`, `reviews:write`; editor `documents:read`, `documents:write`, `clients:read`, `clients:write`, `reviews:write`; admin `*`. Editors can approve someone else's version as reviewers can (a decision by Leighton, 2026-10-19; the design's §6 says so); reviewers approve but never edit, and nobody approves their own version. Users, settings, templates and spend are admin-only and need no scope of their own beyond `*`. Step 1 checks `users:read`, `users:write`, `settings:write`; later steps check the rest and may add to the lists.
 - **Usernames** are kept lower case (checked by the database), 2 to 64 of `a-z 0-9 . _ -`, starting with a letter or number; typed in any case. **Passwords** are 12 to 200 characters.
 - **Every table has `id uuid`, `created_at`, `created_by`** (the design). `app_user.created_by` is null for the first admin and anyone made by the command line. A session's `created_by` is the person who signed in, so it is also the session's owner. `setting` adds `updated_at` and `updated_by`.
 - **`block_change()` names the operation and the table** (`DELETE on app_user is not allowed: rows here are kept as they are`) so one function serves both "append-only" (UPDATE and DELETE, step 2's `document_version`) and "never deleted" (DELETE only, `app_user` now).
 - **The logo is a row in a small `org_logo` table** (`mime`, `content bytea`, `created_at`, `created_by`), and the `org.logo` setting holds the id of the one in use. `bytea` keeps one `pg_dump` a full backup (the design); a table rather than base64 inside the JSON setting keeps 512 KB of bytes out of every settings read, and lets the logo be served with its own type. A new upload is a new row; removing the logo clears the setting. PNG or JPEG only (checked by their first bytes, not just the header), 512 KB at most; SVG is refused because it can carry script.
 - **The logo and the organisation's name are public** (`GET /v1/branding`, `GET /v1/branding/logo`): the sign-in and first-run pages show them before anyone signs in. Everything else needs a session.
 - **First run asks for the organisation's name and the first admin only.** The rest of the design's first-run screen (ABN and contact details, logo, OpenRouter key check, budget) comes from Settings → Organisation now and from step 3's settings later; first run ends on Settings → Organisation. Two first runs at once make one admin (a transaction-scoped advisory lock).
+- **A locked reply says the username exists.** Five wrong passwords answer `locked`, which an unknown username never does. That is accepted, as in Simple LMS: the lock is what stops guessing, and saying nothing about it would leave the person wondering why their right password fails. A locked reply still checks the password against `DUMMY_HASH`, so it takes as long as a real attempt; and a right password whose hash was made with weaker argon2 settings than today's is hashed again (`access.needs_rehash`).
 - **The last active admin can't be demoted or deactivated, and nobody deactivates themselves.** Every active admin's row is locked in id order before the check, so two admins demoting each other at once leave one in charge.
 - **Everyone changes their own password** (`POST /v1/auth/password`, the Account page); an admin can set anyone's (`POST /v1/users/{id}/password`), which also clears a lock. The command line (`sdocs create-user`, `sdocs set-password`) is the way back in when no admin can sign in.
 - **The ABN is checked with the ATO's checksum** and stored as `51 824 753 556`. Email is a plain shape check. Optional fields left blank are stored as null.
@@ -1408,6 +1409,8 @@ git commit -m "Add people, sessions, settings and the logo, and block_change() f
 
 `api/tests/test_access.py`:
 ```python
+from argon2 import PasswordHasher
+
 from sdocs.services import access
 
 
@@ -1439,6 +1442,15 @@ def test_the_dummy_hash_costs_what_a_real_one_does_and_matches_nothing():
     assert _params(access.DUMMY_HASH) == _params(access.hash_password("x"))
     for guess in ("", "password", "correct horse battery"):
         assert not access.verify_password(guess, access.DUMMY_HASH)
+
+
+def test_a_hash_made_with_weaker_settings_needs_rehashing():
+    assert not access.needs_rehash(access.hash_password("correct horse battery"))
+    weaker = PasswordHasher(time_cost=1, memory_cost=8, parallelism=1).hash("x")
+    assert access.needs_rehash(weaker)
+    # a damaged hash can't be checked, so it is not rehashed either (and never raises)
+    assert not access.needs_rehash("$argon2id$v=19$m=65536,t=3,p=4$broken")
+    assert not access.needs_rehash("pbkdf2_sha256$600000$00$00")
 ```
 
 **Step 2: Run it to see it fail**
@@ -1486,12 +1498,21 @@ def verify_password(password: str, stored: str | None) -> bool:
     except (VerificationError, InvalidHashError):
         # a wrong password, or a damaged hash: matches nothing, never a 500
         return False
+
+
+def needs_rehash(stored: str) -> bool:
+    """True when this hash was made with weaker settings than today's, so the
+    next right password should replace it. A damaged hash: False."""
+    try:
+        return _hasher.check_needs_rehash(stored)
+    except InvalidHashError:
+        return False
 ```
 
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_access.py -v`
-Expected: `4 passed`.
+Expected: `5 passed`.
 
 **Step 5: Commit**
 
@@ -1555,7 +1576,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from sdocs.models import UserSession
+from sdocs.models import ROLES, UserSession
 from sdocs.services import sessions
 
 NOW = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
@@ -1582,7 +1603,10 @@ def test_a_request_within_12_hours_keeps_it_going(db, editor):
 def test_12_hours_without_a_request_ends_it(db, editor):
     raw = sessions.start(db, editor, NOW)
     db.commit()
-    assert sessions.find(db, raw, NOW + timedelta(hours=12, seconds=1)) is None
+    last = NOW + timedelta(hours=11, minutes=59, seconds=59)
+    assert sessions.find(db, raw, last) is not None
+    # exactly 12 hours after it was last seen, it has ended
+    assert sessions.find(db, raw, last + sessions.IDLE) is None
 
 
 def test_14_days_after_sign_in_it_ends_however_busy(db, editor):
@@ -1613,8 +1637,10 @@ def test_an_unknown_or_foreign_token_finds_nothing(db, editor):
 def test_ending_one_session_leaves_the_others(db, editor):
     one = sessions.start(db, editor, NOW)
     two = sessions.start(db, editor, NOW)
-    sessions.end(db, one)
+    sessions.end(db, one, NOW)
     db.commit()
+    ended = db.execute(select(UserSession).where(UserSession.revoked_at.is_not(None))).scalar_one()
+    assert ended.revoked_at == NOW
     assert sessions.find(db, one, NOW) is None
     assert sessions.find(db, two, NOW) is not None
 
@@ -1624,8 +1650,10 @@ def test_ending_all_of_someones_sessions_can_keep_this_one(db, editor, admin):
     other = sessions.start(db, editor, NOW)
     admins = sessions.start(db, admin, NOW)
     db.commit()
-    sessions.end_all(db, editor, keep=sessions.find(db, this, NOW))
+    sessions.end_all(db, editor, keep=sessions.find(db, this, NOW), now=NOW)
     db.commit()
+    ended = db.execute(select(UserSession).where(UserSession.revoked_at.is_not(None))).scalar_one()
+    assert ended.revoked_at == NOW
     assert sessions.find(db, this, NOW) is not None
     assert sessions.find(db, other, NOW) is None
     assert sessions.find(db, admins, NOW) is not None
@@ -1636,11 +1664,17 @@ def test_ending_all_of_someones_sessions_can_keep_this_one(db, editor, admin):
 
 def test_each_role_has_its_scopes():
     assert sessions.scopes_for("admin") == ["*"]
+    # editors approve someone else's version too; reviewers approve but never edit
     assert sessions.scopes_for("editor") == ["documents:read", "documents:write",
-                                             "clients:read", "clients:write"]
+                                             "clients:read", "clients:write",
+                                             "reviews:write"]
     assert sessions.scopes_for("reviewer") == ["documents:read", "clients:read",
                                                "reviews:write"]
     assert sessions.scopes_for("owner") == []
+
+
+def test_every_role_has_a_scopes_entry_and_nothing_else_does():
+    assert set(sessions.SCOPES) == set(ROLES)
 ```
 
 **Step 2: Run it to see it fail**
@@ -1678,7 +1712,9 @@ TOUCH_EVERY = timedelta(minutes=1)
 # check the others, and add to these lists when they need to.
 SCOPES: dict[str, list[str]] = {
     "reviewer": ["documents:read", "clients:read", "reviews:write"],
-    "editor": ["documents:read", "documents:write", "clients:read", "clients:write"],
+    # editors approve someone else's version too (nobody approves their own)
+    "editor": ["documents:read", "documents:write", "clients:read", "clients:write",
+               "reviews:write"],
     "admin": ["*"],
 }
 
@@ -1711,7 +1747,7 @@ def find(db: Db, raw: str, now: datetime | None = None) -> UserSession | None:
         select(UserSession).where(UserSession.token_hash == _hash(raw))
     ).scalar_one_or_none()
     if (row is None or row.revoked_at is not None or row.expires_at <= now
-            or now - row.last_seen_at > IDLE):
+            or now - row.last_seen_at >= IDLE):
         return None
     if now - row.last_seen_at >= TOUCH_EVERY:
         row.last_seen_at = now
@@ -1719,27 +1755,28 @@ def find(db: Db, raw: str, now: datetime | None = None) -> UserSession | None:
     return row
 
 
-def end(db: Db, raw: str) -> None:
+def end(db: Db, raw: str, now: datetime | None = None) -> None:
     db.execute(update(UserSession).where(UserSession.token_hash == _hash(raw),
                                          UserSession.revoked_at.is_(None))
-               .values(revoked_at=datetime.now(UTC)))
+               .values(revoked_at=now or datetime.now(UTC)))
     db.flush()
 
 
-def end_all(db: Db, user: AppUser, keep: UserSession | None = None) -> None:
+def end_all(db: Db, user: AppUser, keep: UserSession | None = None,
+            now: datetime | None = None) -> None:
     """End every session of this person, but `keep` (the one asking) if given."""
     q = update(UserSession).where(UserSession.created_by == user.id,
                                   UserSession.revoked_at.is_(None))
     if keep is not None:
         q = q.where(UserSession.id != keep.id)
-    db.execute(q.values(revoked_at=datetime.now(UTC)))
+    db.execute(q.values(revoked_at=now or datetime.now(UTC)))
     db.flush()
 ```
 
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_sessions.py -v`
-Expected: `9 passed`.
+Expected: `10 passed`.
 
 **Step 5: Commit**
 
@@ -1816,7 +1853,7 @@ def test_signing_in_sets_a_cookie_only_the_browser_can_read(client, editor):
     assert r.json() == {"id": str(editor.id), "username": "mel", "display_name": "Mel Grant",
                         "role": "editor",
                         "scopes": ["documents:read", "documents:write", "clients:read",
-                                   "clients:write"]}
+                                   "clients:write", "reviews:write"]}
     cookie = r.headers["set-cookie"]
     assert cookie.startswith("sdocs_session=sdocs_s.")
     lowered = cookie.lower()
@@ -1875,6 +1912,19 @@ def test_a_right_password_clears_the_count(client, db, editor):
     sign_in(client, "mel")
     db.refresh(editor)
     assert editor.failed_attempts == 0 and editor.last_sign_in_at is not None
+
+
+def test_a_hash_with_weaker_settings_is_replaced_at_sign_in(client, db, editor):
+    from argon2 import PasswordHasher
+
+    from sdocs.services import access
+
+    editor.password_hash = PasswordHasher(time_cost=1, memory_cost=8, parallelism=1).hash(PASSWORD)
+    db.commit()
+    sign_in(client, "mel")
+    db.refresh(editor)
+    assert not access.needs_rehash(editor.password_hash)
+    assert access.verify_password(PASSWORD, editor.password_hash)
 
 
 def test_wrong_passwords_sent_all_at_once_still_lock_after_five(client, editor):
@@ -2065,6 +2115,8 @@ def sign_in(body: SignInIn, db: DB, response: Response):
         access.verify_password(body.password, access.DUMMY_HASH)
         raise wrong_password()
     if user.locked_until is not None and user.locked_until > now:
+        # as long as a real attempt, so the reply's timing says no more than its code
+        access.verify_password(body.password, access.DUMMY_HASH)
         raise locked()
     if not access.verify_password(body.password, user.password_hash):
         user.failed_attempts += 1
@@ -2076,6 +2128,9 @@ def sign_in(body: SignInIn, db: DB, response: Response):
         db.commit()
         # no tries-left count: an unknown username could not say it without giving itself away
         raise wrong_password()
+    if access.needs_rehash(user.password_hash):
+        # made with weaker argon2 settings than today's: replace it while we have the password
+        user.password_hash = access.hash_password(body.password)
     user.failed_attempts = 0
     user.locked_until = None
     return signed_in(db, user, response)
@@ -2109,7 +2164,7 @@ v1.include_router(auth.router)
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_auth.py -v`
-Expected: `11 passed`.
+Expected: `12 passed`.
 
 **Step 5: Commit**
 
@@ -5013,7 +5068,7 @@ export const ADA: Me = { id: "u-ada", username: "ada", display_name: "Ada Admin"
 
 export const MEL: Me = {
   id: "u-mel", username: "mel", display_name: "Mel Grant", role: "editor",
-  scopes: ["documents:read", "documents:write", "clients:read", "clients:write"],
+  scopes: ["documents:read", "documents:write", "clients:read", "clients:write", "reviews:write"],
 };
 
 export const ACME: Branding = { setup_needed: false, org_name: "Acme Pty Ltd", logo_id: null };

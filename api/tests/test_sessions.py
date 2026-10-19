@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from sdocs.models import UserSession
+from sdocs.models import ROLES, UserSession
 from sdocs.services import sessions
 
 NOW = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
@@ -30,7 +30,10 @@ def test_a_request_within_12_hours_keeps_it_going(db, editor):
 def test_12_hours_without_a_request_ends_it(db, editor):
     raw = sessions.start(db, editor, NOW)
     db.commit()
-    assert sessions.find(db, raw, NOW + timedelta(hours=12, seconds=1)) is None
+    last = NOW + timedelta(hours=11, minutes=59, seconds=59)
+    assert sessions.find(db, raw, last) is not None
+    # exactly 12 hours after it was last seen, it has ended
+    assert sessions.find(db, raw, last + sessions.IDLE) is None
 
 
 def test_14_days_after_sign_in_it_ends_however_busy(db, editor):
@@ -61,8 +64,10 @@ def test_an_unknown_or_foreign_token_finds_nothing(db, editor):
 def test_ending_one_session_leaves_the_others(db, editor):
     one = sessions.start(db, editor, NOW)
     two = sessions.start(db, editor, NOW)
-    sessions.end(db, one)
+    sessions.end(db, one, NOW)
     db.commit()
+    ended = db.execute(select(UserSession).where(UserSession.revoked_at.is_not(None))).scalar_one()
+    assert ended.revoked_at == NOW
     assert sessions.find(db, one, NOW) is None
     assert sessions.find(db, two, NOW) is not None
 
@@ -72,8 +77,10 @@ def test_ending_all_of_someones_sessions_can_keep_this_one(db, editor, admin):
     other = sessions.start(db, editor, NOW)
     admins = sessions.start(db, admin, NOW)
     db.commit()
-    sessions.end_all(db, editor, keep=sessions.find(db, this, NOW))
+    sessions.end_all(db, editor, keep=sessions.find(db, this, NOW), now=NOW)
     db.commit()
+    ended = db.execute(select(UserSession).where(UserSession.revoked_at.is_not(None))).scalar_one()
+    assert ended.revoked_at == NOW
     assert sessions.find(db, this, NOW) is not None
     assert sessions.find(db, other, NOW) is None
     assert sessions.find(db, admins, NOW) is not None
@@ -84,8 +91,14 @@ def test_ending_all_of_someones_sessions_can_keep_this_one(db, editor, admin):
 
 def test_each_role_has_its_scopes():
     assert sessions.scopes_for("admin") == ["*"]
+    # editors approve someone else's version too; reviewers approve but never edit
     assert sessions.scopes_for("editor") == ["documents:read", "documents:write",
-                                             "clients:read", "clients:write"]
+                                             "clients:read", "clients:write",
+                                             "reviews:write"]
     assert sessions.scopes_for("reviewer") == ["documents:read", "clients:read",
                                                "reviews:write"]
     assert sessions.scopes_for("owner") == []
+
+
+def test_every_role_has_a_scopes_entry_and_nothing_else_does():
+    assert set(sessions.SCOPES) == set(ROLES)

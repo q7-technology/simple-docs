@@ -1,3 +1,5 @@
+from argon2 import PasswordHasher
+
 from sdocs.services import access
 
 
@@ -29,3 +31,12 @@ def test_the_dummy_hash_costs_what_a_real_one_does_and_matches_nothing():
     assert _params(access.DUMMY_HASH) == _params(access.hash_password("x"))
     for guess in ("", "password", "correct horse battery"):
         assert not access.verify_password(guess, access.DUMMY_HASH)
+
+
+def test_a_hash_made_with_weaker_settings_needs_rehashing():
+    assert not access.needs_rehash(access.hash_password("correct horse battery"))
+    weaker = PasswordHasher(time_cost=1, memory_cost=8, parallelism=1).hash("x")
+    assert access.needs_rehash(weaker)
+    # a damaged hash can't be checked, so it is not rehashed either (and never raises)
+    assert not access.needs_rehash("$argon2id$v=19$m=65536,t=3,p=4$broken")
+    assert not access.needs_rehash("pbkdf2_sha256$600000$00$00")

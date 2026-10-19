@@ -342,6 +342,8 @@ Duplicate; Import/Export YAML.
 | Spend | admin | Month vs budget, by model / template / user, recent runs. |
 | Settings | admin | Users and roles, models, budget and caps, ignore and redaction, connectors, org. |
 
+Editors and reviewers can approve someone else's version; reviewers cannot edit.
+
 ### Editor
 
 ```

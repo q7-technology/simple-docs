@@ -24,7 +24,9 @@ TOUCH_EVERY = timedelta(minutes=1)
 # check the others, and add to these lists when they need to.
 SCOPES: dict[str, list[str]] = {
     "reviewer": ["documents:read", "clients:read", "reviews:write"],
-    "editor": ["documents:read", "documents:write", "clients:read", "clients:write"],
+    # editors approve someone else's version too (nobody approves their own)
+    "editor": ["documents:read", "documents:write", "clients:read", "clients:write",
+               "reviews:write"],
     "admin": ["*"],
 }
 
@@ -57,7 +59,7 @@ def find(db: Db, raw: str, now: datetime | None = None) -> UserSession | None:
         select(UserSession).where(UserSession.token_hash == _hash(raw))
     ).scalar_one_or_none()
     if (row is None or row.revoked_at is not None or row.expires_at <= now
-            or now - row.last_seen_at > IDLE):
+            or now - row.last_seen_at >= IDLE):
         return None
     if now - row.last_seen_at >= TOUCH_EVERY:
         row.last_seen_at = now
@@ -65,18 +67,19 @@ def find(db: Db, raw: str, now: datetime | None = None) -> UserSession | None:
     return row
 
 
-def end(db: Db, raw: str) -> None:
+def end(db: Db, raw: str, now: datetime | None = None) -> None:
     db.execute(update(UserSession).where(UserSession.token_hash == _hash(raw),
                                          UserSession.revoked_at.is_(None))
-               .values(revoked_at=datetime.now(UTC)))
+               .values(revoked_at=now or datetime.now(UTC)))
     db.flush()
 
 
-def end_all(db: Db, user: AppUser, keep: UserSession | None = None) -> None:
+def end_all(db: Db, user: AppUser, keep: UserSession | None = None,
+            now: datetime | None = None) -> None:
     """End every session of this person, but `keep` (the one asking) if given."""
     q = update(UserSession).where(UserSession.created_by == user.id,
                                   UserSession.revoked_at.is_(None))
     if keep is not None:
         q = q.where(UserSession.id != keep.id)
-    db.execute(q.values(revoked_at=datetime.now(UTC)))
+    db.execute(q.values(revoked_at=now or datetime.now(UTC)))
     db.flush()
