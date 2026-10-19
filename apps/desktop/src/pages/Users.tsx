@@ -262,7 +262,7 @@ export function Users() {
             Deactivate someone who leaves: they can't sign in, and their name stays on what they wrote.
           </CardDescription>
         </CardHeader>
-        <CardContent className="overflow-x-auto">
+        <CardContent className="relative overflow-x-auto">
           {users === null ? (
             loadTrouble ? (
               <div className="flex flex-col items-start gap-4">

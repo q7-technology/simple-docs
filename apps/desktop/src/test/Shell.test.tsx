@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { apiError, MEL, renderApp, stubApi } from "./harness";
+import { ADA, apiError, json, MEL, renderApp, stubApi } from "./harness";
 
 async function mainLinks() {
   const nav = await screen.findByRole("navigation", { name: "Main" });
@@ -93,6 +93,21 @@ describe("the app shell", () => {
     const nav = await screen.findByRole("navigation", { name: "Main" });
     await userEvent.click(within(nav).getByRole("link", { name: "Clients" }));
     expect(await screen.findByRole("heading", { level: 1, name: "Clients" })).toHaveFocus();
+  });
+
+  it("notices a session ended elsewhere when you move to another page", async () => {
+    let asked = 0;
+    const { calls } = stubApi((_method, url) => {
+      if (url !== "/api/v1/auth/me") return null;
+      asked += 1;
+      return asked === 1 ? json(200, ADA) : apiError(401, "signed_out", "You're signed out. Sign in again.");
+    });
+    renderApp("/documents");
+    const nav = await screen.findByRole("navigation", { name: "Main" });
+    // opening the app asks who you are once, not twice
+    expect(calls.filter((c) => c.url === "/api/v1/auth/me")).toHaveLength(1);
+    await userEvent.click(within(nav).getByRole("link", { name: "Clients" }));
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
   });
 
   it("leaves focus alone on the first page", async () => {

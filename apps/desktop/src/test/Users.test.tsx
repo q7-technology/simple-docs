@@ -53,6 +53,15 @@ describe("Settings → Users", () => {
     expect(screen.getByLabelText("Role for Mel Grant")).toHaveValue("editor");
   });
 
+  it("scrolls the table inside its card, with the card's words for screen readers kept there too", async () => {
+    usersApi();
+    renderApp("/settings/users");
+    const table = await screen.findByRole("table", { name: "People who sign in" });
+    // sr-only text is absolute: without a positioned scroller it is placed
+    // against the page and widens it on a narrow window
+    expect(table.parentElement).toHaveClass("relative", "overflow-x-auto");
+  });
+
   it("says when the list can't be loaded, and tries again", async () => {
     let failed = false;
     usersApi((method, url) => {

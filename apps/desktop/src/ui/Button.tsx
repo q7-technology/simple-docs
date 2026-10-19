@@ -5,9 +5,13 @@ export type ButtonVariant = "primary" | "outline" | "ghost" | "destructive";
 export type ButtonSize = "default" | "sm" | "lg" | "icon";
 
 // The design system's Button: 40px, radius-md, the label style, an icon
-// child at 16px and click-through, and the focus ring kept.
+// child at 16px and click-through, and the focus ring kept. Only the colours
+// ease: Tailwind 4's transition-colors eases outline-color too, so the ring
+// would fade in from dark.
+export const EASE = "transition-[color,background-color,border-color]";
+
 const base =
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-label transition-colors " +
+  `inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-label ${EASE} ` +
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring " +
   "disabled:pointer-events-none disabled:opacity-50 " +
   "[&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0";

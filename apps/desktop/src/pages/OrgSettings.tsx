@@ -3,7 +3,7 @@ import { Upload } from "lucide-react";
 import { api, fieldErrorsOf, messageOf } from "../api/client";
 import type { Org } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
-import { Button } from "../ui/Button";
+import { Button, EASE } from "../ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/Card";
 import { TextAreaField, TextField, useFocusFirstInvalid } from "../ui/Field";
 import { LiveNotices, Notice } from "../ui/Notice";
@@ -26,9 +26,10 @@ function toForm(o: Org): OrgForm {
 }
 
 // the outline Button's look, on the label that opens the file picker; the
-// ring shows when the hidden input has keyboard focus, as a button's would
+// ring shows when the hidden input has keyboard focus, as a button's would,
+// and the label is positioned so that sr-only input stays inside it
 const PICK =
-  "inline-flex h-10 cursor-pointer items-center gap-2 rounded-md border border-space-blue/30 px-4 text-label " +
+  `relative inline-flex h-10 cursor-pointer items-center gap-2 rounded-md border border-space-blue/30 px-4 text-label ${EASE} ` +
   "text-space-lightGray hover:border-space-blue/50 hover:bg-space-blue/10 " +
   "has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-ring " +
   "has-[[aria-disabled=true]]:cursor-not-allowed has-[[aria-disabled=true]]:opacity-50 [&_svg]:size-4";
@@ -43,6 +44,8 @@ export function OrgSettings() {
   const [fields, setFields] = useState<Record<string, string>>({});
   const [done, setDone] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  // what went wrong with the logo is said in its card, beside the picker
+  const [logoProblem, setLogoProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [logoWork, setLogoWork] = useState<LogoWork>(null);
   // read at once: a second pick can land before React renders again
@@ -70,6 +73,13 @@ export function OrgSettings() {
   function say(message: string | null, trouble: string | null = null) {
     setDone(message);
     setProblem(trouble);
+    setLogoProblem(null);
+  }
+
+  function logoTrouble(trouble: string) {
+    setDone(null);
+    setProblem(null);
+    setLogoProblem(trouble);
   }
 
   async function save(e: FormEvent) {
@@ -101,7 +111,7 @@ export function OrgSettings() {
       await reloadBranding();
       say(said);
     } catch (err) {
-      say(null, messageOf(err));
+      logoTrouble(messageOf(err));
     } finally {
       logoBusy.current = false;
       setLogoWork(null);
@@ -114,8 +124,8 @@ export function OrgSettings() {
     if (!file || logoBusy.current) return;
     say(null);
     // the API checks both too; this saves sending a file it would refuse
-    if (!KINDS.includes(file.type)) return say(null, "Use a PNG or JPEG for the logo.");
-    if (file.size > MAX_LOGO) return say(null, "The logo can be 512 KB at most.");
+    if (!KINDS.includes(file.type)) return logoTrouble("Use a PNG or JPEG for the logo.");
+    if (file.size > MAX_LOGO) return logoTrouble("The logo can be 512 KB at most.");
     void logo("uploading", async () => {
       await api.put("/v1/settings/org/logo", file);
       return "Logo updated.";
@@ -147,22 +157,25 @@ export function OrgSettings() {
             JPEG, 512 KB at most.
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-wrap items-center gap-4">
-          <OrgMark logoId={branding?.logo_id ?? null} size={64} />
-          <label className={PICK}>
-            <Upload aria-hidden="true" />
-            {logoWork === "uploading" ? "Uploading…" : branding?.logo_id ? "Replace logo" : "Upload logo"}
-            <input ref={picker} type="file" accept="image/png,image/jpeg" className="sr-only"
-                   aria-disabled={logoWork ? true : undefined}
-                   onClick={(e) => { if (logoBusy.current) e.preventDefault(); }}
-                   onChange={upload} />
-          </label>
-          {branding?.logo_id && (
-            <Button variant="ghost" aria-disabled={logoWork ? true : undefined}
-                    className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50" onClick={removeLogo}>
-              {logoWork === "removing" ? "Removing…" : "Remove logo"}
-            </Button>
-          )}
+        <CardContent className="flex flex-col gap-4">
+          {logoProblem && <Notice>{logoProblem}</Notice>}
+          <div className="flex flex-wrap items-center gap-4">
+            <OrgMark logoId={branding?.logo_id ?? null} size={64} />
+            <label className={PICK}>
+              <Upload aria-hidden="true" />
+              {logoWork === "uploading" ? "Uploading…" : branding?.logo_id ? "Replace logo" : "Upload logo"}
+              <input ref={picker} type="file" accept="image/png,image/jpeg" className="sr-only"
+                     aria-disabled={logoWork ? true : undefined}
+                     onClick={(e) => { if (logoBusy.current) e.preventDefault(); }}
+                     onChange={upload} />
+            </label>
+            {branding?.logo_id && (
+              <Button variant="ghost" aria-disabled={logoWork ? true : undefined}
+                      className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50" onClick={removeLogo}>
+                {logoWork === "removing" ? "Removing…" : "Remove logo"}
+              </Button>
+            )}
+          </div>
         </CardContent>
       </Card>
 

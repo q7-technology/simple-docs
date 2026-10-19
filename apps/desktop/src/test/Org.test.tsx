@@ -17,6 +17,11 @@ function orgApi(extra: Handler = () => null, branding = ACME) {
   }, { branding });
 }
 
+/** The card the Logo heading is in. */
+function logoCard() {
+  return screen.getByRole("heading", { level: 2, name: "Logo" }).parentElement?.parentElement;
+}
+
 describe("Settings → Organisation", () => {
   it("shows the organisation's details", async () => {
     orgApi();
@@ -101,8 +106,30 @@ describe("Settings → Organisation", () => {
     renderApp("/settings/org");
     const big = new File([new Uint8Array(512 * 1024 + 1)], "big.png", { type: "image/png" });
     await userEvent.upload(await screen.findByLabelText("Upload logo"), big);
-    expect(await screen.findByRole("alert")).toHaveTextContent("The logo can be 512 KB at most.");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("The logo can be 512 KB at most.");
+    // said in the Logo card, beside the picker, not at the top of the page
+    expect(logoCard()).toContainElement(alert);
     expect(calls.some((c) => c.url === "/api/v1/settings/org/logo")).toBe(false);
+  });
+
+  it("says why the API refused a logo in the Logo card", async () => {
+    orgApi((method, url) => method === "PUT" && url === "/api/v1/settings/org/logo"
+      ? apiError(422, "invalid", "That isn't a PNG or JPEG we can read.") : null);
+    renderApp("/settings/org");
+    const logo = new File([new Uint8Array([1, 2, 3])], "logo.png", { type: "image/png" });
+    await userEvent.upload(await screen.findByLabelText("Upload logo"), logo);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("That isn't a PNG or JPEG we can read.");
+    expect(logoCard()).toContainElement(alert);
+  });
+
+  it("shows the picker's focus ring at once rather than fading it in", async () => {
+    orgApi();
+    renderApp("/settings/org");
+    const label = (await screen.findByLabelText("Upload logo")).closest("label");
+    expect(label).toHaveClass("transition-[color,background-color,border-color]");
+    expect(label).not.toHaveClass("transition-colors");
   });
 
   it("removes the logo", async () => {

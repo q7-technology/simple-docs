@@ -22,6 +22,14 @@ describe("the Q7 components", () => {
     expect(screen.getByRole("button")).toHaveClass("focus-visible:outline-ring");
   });
 
+  it("shows the focus ring at once rather than fading it in", () => {
+    render(<Button variant="outline">Cancel</Button>);
+    const button = screen.getByRole("button");
+    // transition-colors would animate outline-color too
+    expect(button).toHaveClass("transition-[color,background-color,border-color]");
+    expect(button).not.toHaveClass("transition-colors");
+  });
+
   it("draws a card on the brand surface", () => {
     render(<Card data-testid="card"><CardTitle>Users</CardTitle></Card>);
     expect(screen.getByTestId("card")).toHaveClass("bg-space-darkBlue/60", "border-space-blue/20", "backdrop-blur-sm");

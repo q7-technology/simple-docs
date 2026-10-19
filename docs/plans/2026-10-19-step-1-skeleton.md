@@ -4765,6 +4765,14 @@ describe("the Q7 components", () => {
     expect(screen.getByRole("button")).toHaveClass("focus-visible:outline-ring");
   });
 
+  it("shows the focus ring at once rather than fading it in", () => {
+    render(<Button variant="outline">Cancel</Button>);
+    const button = screen.getByRole("button");
+    // transition-colors would animate outline-color too
+    expect(button).toHaveClass("transition-[color,background-color,border-color]");
+    expect(button).not.toHaveClass("transition-colors");
+  });
+
   it("draws a card on the brand surface", () => {
     render(<Card data-testid="card"><CardTitle>Users</CardTitle></Card>);
     expect(screen.getByTestId("card")).toHaveClass("bg-space-darkBlue/60", "border-space-blue/20", "backdrop-blur-sm");
@@ -4857,9 +4865,13 @@ export type ButtonVariant = "primary" | "outline" | "ghost" | "destructive";
 export type ButtonSize = "default" | "sm" | "lg" | "icon";
 
 // The design system's Button: 40px, radius-md, the label style, an icon
-// child at 16px and click-through, and the focus ring kept.
+// child at 16px and click-through, and the focus ring kept. Only the colours
+// ease: Tailwind 4's transition-colors eases outline-color too, so the ring
+// would fade in from dark.
+export const EASE = "transition-[color,background-color,border-color]";
+
 const base =
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-label transition-colors " +
+  `inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-label ${EASE} ` +
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring " +
   "disabled:pointer-events-none disabled:opacity-50 " +
   "[&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0";
@@ -6470,7 +6482,7 @@ git commit -m "Sign in to the desktop, and set up a fresh install from it" \
 ```tsx
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { apiError, MEL, renderApp, stubApi } from "./harness";
+import { ADA, apiError, json, MEL, renderApp, stubApi } from "./harness";
 
 async function mainLinks() {
   const nav = await screen.findByRole("navigation", { name: "Main" });
@@ -6565,6 +6577,21 @@ describe("the app shell", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Clients" })).toHaveFocus();
   });
 
+  it("notices a session ended elsewhere when you move to another page", async () => {
+    let asked = 0;
+    const { calls } = stubApi((_method, url) => {
+      if (url !== "/api/v1/auth/me") return null;
+      asked += 1;
+      return asked === 1 ? json(200, ADA) : apiError(401, "signed_out", "You're signed out. Sign in again.");
+    });
+    renderApp("/documents");
+    const nav = await screen.findByRole("navigation", { name: "Main" });
+    // opening the app asks who you are once, not twice
+    expect(calls.filter((c) => c.url === "/api/v1/auth/me")).toHaveLength(1);
+    await userEvent.click(within(nav).getByRole("link", { name: "Clients" }));
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+  });
+
   it("leaves focus alone on the first page", async () => {
     stubApi();
     renderApp("/documents");
@@ -6583,14 +6610,14 @@ Expected: FAIL, `Unable to find role="heading" and name "Documents"` (the placeh
 
 `apps/desktop/src/ui/Layout.tsx`:
 ```tsx
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { LogOut, Settings } from "lucide-react";
-import { Link, NavLink, Outlet } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import { messageOf } from "../api/client";
 import type { Role } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { Badge } from "./Badge";
-import { Button } from "./Button";
+import { Button, EASE } from "./Button";
 import { cn } from "./cn";
 import { Notice } from "./Notice";
 import { OrgMark } from "./OrgMark";
@@ -6600,7 +6627,7 @@ export const ROLE_NAMES: Record<Role, string> = { admin: "Admin", editor: "Edito
 
 export const navLink = ({ isActive }: { isActive: boolean }) =>
   cn(
-    "inline-flex h-10 items-center gap-2 rounded-md px-3 text-label transition-colors",
+    `inline-flex h-10 items-center gap-2 rounded-md px-3 text-label ${EASE}`,
     isActive ? "bg-space-blue/10 text-space-lightGray" : "text-space-gray hover:text-space-lightGray",
   );
 
@@ -6609,12 +6636,27 @@ export const navLink = ({ isActive }: { isActive: boolean }) =>
  * Spend, with you on the right. Templates and Spend are admins' screens.
  * On a narrow window the navbar wraps onto more rows rather than overflow,
  * and scrolls away rather than stick over the page (sticky from sm up).
- * Following a link moves focus to the new page's heading (RouteFocus).
+ * Following a link moves focus to the new page's heading (RouteFocus), and
+ * asks again who is signed in, so a session ended elsewhere (signed out,
+ * deactivated, a new password) goes to sign in rather than lingering. The
+ * page you open on doesn't ask: the app has only just asked.
  * The skip link's padding is focus: only, because not-sr-only sets padding: 0
  * and would otherwise win over a plain px-4 py-2. */
 export function Layout() {
-  const { me, branding, can, signOut } = useAuth();
+  const { me, branding, can, signOut, refreshMe } = useAuth();
   const [stuck, setStuck] = useState<string | null>(null);
+  const { pathname } = useLocation();
+  const first = useRef(true);
+
+  useEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    // signed out clears who you are, and RequireAuth sends you to sign in;
+    // not reaching Simple Docs leaves you where you are
+    refreshMe().catch(() => {});
+  }, [pathname, refreshMe]);
 
   async function leave() {
     setStuck(null);
@@ -6875,6 +6917,15 @@ describe("Settings → Users", () => {
     expect(within(rows[1]).getByText("Locked")).toBeInTheDocument();
     expect(within(rows[2]).getByText("Deactivated")).toBeInTheDocument();
     expect(screen.getByLabelText("Role for Mel Grant")).toHaveValue("editor");
+  });
+
+  it("scrolls the table inside its card, with the card's words for screen readers kept there too", async () => {
+    usersApi();
+    renderApp("/settings/users");
+    const table = await screen.findByRole("table", { name: "People who sign in" });
+    // sr-only text is absolute: without a positioned scroller it is placed
+    // against the page and widens it on a narrow window
+    expect(table.parentElement).toHaveClass("relative", "overflow-x-auto");
   });
 
   it("says when the list can't be loaded, and tries again", async () => {
@@ -7381,7 +7432,7 @@ export function Users() {
             Deactivate someone who leaves: they can't sign in, and their name stays on what they wrote.
           </CardDescription>
         </CardHeader>
-        <CardContent className="overflow-x-auto">
+        <CardContent className="relative overflow-x-auto">
           {users === null ? (
             loadTrouble ? (
               <div className="flex flex-col items-start gap-4">
@@ -7621,6 +7672,11 @@ function orgApi(extra: Handler = () => null, branding = ACME) {
   }, { branding });
 }
 
+/** The card the Logo heading is in. */
+function logoCard() {
+  return screen.getByRole("heading", { level: 2, name: "Logo" }).parentElement?.parentElement;
+}
+
 describe("Settings → Organisation", () => {
   it("shows the organisation's details", async () => {
     orgApi();
@@ -7705,8 +7761,30 @@ describe("Settings → Organisation", () => {
     renderApp("/settings/org");
     const big = new File([new Uint8Array(512 * 1024 + 1)], "big.png", { type: "image/png" });
     await userEvent.upload(await screen.findByLabelText("Upload logo"), big);
-    expect(await screen.findByRole("alert")).toHaveTextContent("The logo can be 512 KB at most.");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("The logo can be 512 KB at most.");
+    // said in the Logo card, beside the picker, not at the top of the page
+    expect(logoCard()).toContainElement(alert);
     expect(calls.some((c) => c.url === "/api/v1/settings/org/logo")).toBe(false);
+  });
+
+  it("says why the API refused a logo in the Logo card", async () => {
+    orgApi((method, url) => method === "PUT" && url === "/api/v1/settings/org/logo"
+      ? apiError(422, "invalid", "That isn't a PNG or JPEG we can read.") : null);
+    renderApp("/settings/org");
+    const logo = new File([new Uint8Array([1, 2, 3])], "logo.png", { type: "image/png" });
+    await userEvent.upload(await screen.findByLabelText("Upload logo"), logo);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("That isn't a PNG or JPEG we can read.");
+    expect(logoCard()).toContainElement(alert);
+  });
+
+  it("shows the picker's focus ring at once rather than fading it in", async () => {
+    orgApi();
+    renderApp("/settings/org");
+    const label = (await screen.findByLabelText("Upload logo")).closest("label");
+    expect(label).toHaveClass("transition-[color,background-color,border-color]");
+    expect(label).not.toHaveClass("transition-colors");
   });
 
   it("removes the logo", async () => {
@@ -7759,7 +7837,7 @@ import { Upload } from "lucide-react";
 import { api, fieldErrorsOf, messageOf } from "../api/client";
 import type { Org } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
-import { Button } from "../ui/Button";
+import { Button, EASE } from "../ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/Card";
 import { TextAreaField, TextField, useFocusFirstInvalid } from "../ui/Field";
 import { LiveNotices, Notice } from "../ui/Notice";
@@ -7782,9 +7860,10 @@ function toForm(o: Org): OrgForm {
 }
 
 // the outline Button's look, on the label that opens the file picker; the
-// ring shows when the hidden input has keyboard focus, as a button's would
+// ring shows when the hidden input has keyboard focus, as a button's would,
+// and the label is positioned so that sr-only input stays inside it
 const PICK =
-  "inline-flex h-10 cursor-pointer items-center gap-2 rounded-md border border-space-blue/30 px-4 text-label " +
+  `relative inline-flex h-10 cursor-pointer items-center gap-2 rounded-md border border-space-blue/30 px-4 text-label ${EASE} ` +
   "text-space-lightGray hover:border-space-blue/50 hover:bg-space-blue/10 " +
   "has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-ring " +
   "has-[[aria-disabled=true]]:cursor-not-allowed has-[[aria-disabled=true]]:opacity-50 [&_svg]:size-4";
@@ -7799,6 +7878,8 @@ export function OrgSettings() {
   const [fields, setFields] = useState<Record<string, string>>({});
   const [done, setDone] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  // what went wrong with the logo is said in its card, beside the picker
+  const [logoProblem, setLogoProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [logoWork, setLogoWork] = useState<LogoWork>(null);
   // read at once: a second pick can land before React renders again
@@ -7826,6 +7907,13 @@ export function OrgSettings() {
   function say(message: string | null, trouble: string | null = null) {
     setDone(message);
     setProblem(trouble);
+    setLogoProblem(null);
+  }
+
+  function logoTrouble(trouble: string) {
+    setDone(null);
+    setProblem(null);
+    setLogoProblem(trouble);
   }
 
   async function save(e: FormEvent) {
@@ -7857,7 +7945,7 @@ export function OrgSettings() {
       await reloadBranding();
       say(said);
     } catch (err) {
-      say(null, messageOf(err));
+      logoTrouble(messageOf(err));
     } finally {
       logoBusy.current = false;
       setLogoWork(null);
@@ -7870,8 +7958,8 @@ export function OrgSettings() {
     if (!file || logoBusy.current) return;
     say(null);
     // the API checks both too; this saves sending a file it would refuse
-    if (!KINDS.includes(file.type)) return say(null, "Use a PNG or JPEG for the logo.");
-    if (file.size > MAX_LOGO) return say(null, "The logo can be 512 KB at most.");
+    if (!KINDS.includes(file.type)) return logoTrouble("Use a PNG or JPEG for the logo.");
+    if (file.size > MAX_LOGO) return logoTrouble("The logo can be 512 KB at most.");
     void logo("uploading", async () => {
       await api.put("/v1/settings/org/logo", file);
       return "Logo updated.";
@@ -7903,22 +7991,25 @@ export function OrgSettings() {
             JPEG, 512 KB at most.
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-wrap items-center gap-4">
-          <OrgMark logoId={branding?.logo_id ?? null} size={64} />
-          <label className={PICK}>
-            <Upload aria-hidden="true" />
-            {logoWork === "uploading" ? "Uploading…" : branding?.logo_id ? "Replace logo" : "Upload logo"}
-            <input ref={picker} type="file" accept="image/png,image/jpeg" className="sr-only"
-                   aria-disabled={logoWork ? true : undefined}
-                   onClick={(e) => { if (logoBusy.current) e.preventDefault(); }}
-                   onChange={upload} />
-          </label>
-          {branding?.logo_id && (
-            <Button variant="ghost" aria-disabled={logoWork ? true : undefined}
-                    className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50" onClick={removeLogo}>
-              {logoWork === "removing" ? "Removing…" : "Remove logo"}
-            </Button>
-          )}
+        <CardContent className="flex flex-col gap-4">
+          {logoProblem && <Notice>{logoProblem}</Notice>}
+          <div className="flex flex-wrap items-center gap-4">
+            <OrgMark logoId={branding?.logo_id ?? null} size={64} />
+            <label className={PICK}>
+              <Upload aria-hidden="true" />
+              {logoWork === "uploading" ? "Uploading…" : branding?.logo_id ? "Replace logo" : "Upload logo"}
+              <input ref={picker} type="file" accept="image/png,image/jpeg" className="sr-only"
+                     aria-disabled={logoWork ? true : undefined}
+                     onClick={(e) => { if (logoBusy.current) e.preventDefault(); }}
+                     onChange={upload} />
+            </label>
+            {branding?.logo_id && (
+              <Button variant="ghost" aria-disabled={logoWork ? true : undefined}
+                      className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50" onClick={removeLogo}>
+                {logoWork === "removing" ? "Removing…" : "Remove logo"}
+              </Button>
+            )}
+          </div>
         </CardContent>
       </Card>
 
