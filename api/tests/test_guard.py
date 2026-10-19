@@ -19,8 +19,17 @@ def test_a_change_without_the_header_is_refused(engine, editor):
         assert getattr(bare, method)("/v1/anything").json() == REFUSED
 
 
+def test_any_other_value_or_method_is_refused(engine):
+    bare = TestClient(app)
+    assert bare.post("/v1/auth/sign-out", headers={"X-Simple-Docs": "0"}).json() == REFUSED
+    assert bare.request("PROPFIND", "/v1/anything").json() == REFUSED
+
+
 def test_reading_needs_no_header(engine):
-    assert TestClient(app).get("/v1/health").status_code == 200
+    bare = TestClient(app)
+    assert bare.get("/v1/health").status_code == 200
+    assert bare.head("/v1/health").status_code != 403
+    assert bare.options("/v1/health").status_code != 403
 
 
 def test_with_the_header_it_goes_through(client, editor):

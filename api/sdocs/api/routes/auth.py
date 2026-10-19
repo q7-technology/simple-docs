@@ -3,6 +3,7 @@ httpOnly, SameSite=Strict cookie and nowhere else: the desktop's scripts
 never see it, and a script of your own keeps it in a cookie jar."""
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -18,6 +19,7 @@ from sdocs.models import AppUser
 from sdocs.services import access, sessions
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+log = logging.getLogger("sdocs")
 
 TRIES = 5
 LOCK = timedelta(minutes=15)
@@ -62,8 +64,10 @@ def signed_in(db, user: AppUser, response: Response) -> MeOut:
 
 
 @router.post("/sign-in", response_model=MeOut)
-def sign_in(body: SignInIn, db: DB, response: Response):
-    """Five wrong passwords lock the password for 15 minutes."""
+def sign_in(body: SignInIn, db: DB, response: Response,
+            token: Annotated[str | None, Cookie(alias=COOKIE)] = None):
+    """Five wrong passwords lock the password for 15 minutes. Signing in ends
+    the session this browser had, so a replaced cookie leaves nothing live."""
     # the row stays locked until this attempt is counted, so guesses sent all
     # at once are weighed one after another and cannot get past the limit
     user = db.execute(select(AppUser).where(AppUser.username == body.username.strip().lower())
@@ -83,6 +87,7 @@ def sign_in(body: SignInIn, db: DB, response: Response):
             user.failed_attempts = 0
             user.locked_until = now + LOCK
             db.commit()
+            log.info("sign-in locked for %s", user.username)
             raise locked()
         db.commit()
         # no tries-left count: an unknown username could not say it without giving itself away
@@ -92,6 +97,8 @@ def sign_in(body: SignInIn, db: DB, response: Response):
         user.password_hash = access.hash_password(body.password)
     user.failed_attempts = 0
     user.locked_until = None
+    if token:
+        sessions.end(db, token)
     return signed_in(db, user, response)
 
 

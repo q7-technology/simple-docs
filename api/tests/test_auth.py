@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 from conftest import PASSWORD, all_at_once, fresh_client, make_user, sign_in
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from sdocs.models import AppUser, UserSession
 
@@ -111,6 +111,48 @@ def test_signing_out_ends_the_session(client, editor):
     assert client.get("/v1/auth/me", headers={"Cookie": f"sdocs_session={token}"}).status_code == 401
     # again, or with no session at all, is still fine
     assert client.post("/v1/auth/sign-out").status_code == 204
+
+
+def test_signing_in_again_ends_the_session_the_browser_had(client, editor, reviewer):
+    sign_in(client, "mel")
+    old = client.cookies["sdocs_session"]
+    sign_in(client, "sam")
+    assert client.get("/v1/auth/me").json()["username"] == "sam"
+    assert fresh_client().get("/v1/auth/me",
+                              headers={"Cookie": f"sdocs_session={old}"}).status_code == 401
+
+
+def test_with_secure_cookies_on_both_cookies_say_secure(monkeypatch, client, editor):
+    from sdocs.config import get_settings
+
+    monkeypatch.setenv("DOCS_COOKIE_SECURE", "true")
+    get_settings.cache_clear()
+    try:
+        r = _try(client, "mel", PASSWORD)
+        assert "; secure" in r.headers["set-cookie"].lower()
+        out = client.post("/v1/auth/sign-out")
+        assert "; secure" in out.headers["set-cookie"].lower()
+    finally:
+        monkeypatch.delenv("DOCS_COOKIE_SECURE")
+        get_settings.cache_clear()
+
+
+def test_a_lock_is_logged(client, editor, caplog):
+    with caplog.at_level("INFO", logger="sdocs"):
+        for _ in range(5):
+            _try(client, "mel", "nope")
+    assert "sign-in locked for mel" in caplog.text
+
+
+def test_a_request_keeps_the_session_fresh(client, db, editor):
+    sign_in(client, "mel")
+    then = datetime.now(UTC) - timedelta(minutes=2)
+    db.execute(update(UserSession).values(last_seen_at=then))
+    db.commit()
+    assert client.get("/v1/auth/me").status_code == 200
+    row = db.execute(select(UserSession)).scalar_one()
+    db.refresh(row)
+    assert row.last_seen_at > then + timedelta(minutes=1)
 
 
 def test_12_hours_without_a_request_signs_you_out(client, db, editor):

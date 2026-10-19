@@ -1835,9 +1835,9 @@ def reviewer_client(reviewer):
 ```python
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import update
-
 from conftest import PASSWORD, all_at_once, fresh_client, make_user, sign_in
+from sqlalchemy import select, update
+
 from sdocs.models import AppUser, UserSession
 
 WRONG = {"error": {"code": "wrong_password", "message": "Wrong username or password."}}
@@ -1948,6 +1948,48 @@ def test_signing_out_ends_the_session(client, editor):
     assert client.post("/v1/auth/sign-out").status_code == 204
 
 
+def test_signing_in_again_ends_the_session_the_browser_had(client, editor, reviewer):
+    sign_in(client, "mel")
+    old = client.cookies["sdocs_session"]
+    sign_in(client, "sam")
+    assert client.get("/v1/auth/me").json()["username"] == "sam"
+    assert fresh_client().get("/v1/auth/me",
+                              headers={"Cookie": f"sdocs_session={old}"}).status_code == 401
+
+
+def test_with_secure_cookies_on_both_cookies_say_secure(monkeypatch, client, editor):
+    from sdocs.config import get_settings
+
+    monkeypatch.setenv("DOCS_COOKIE_SECURE", "true")
+    get_settings.cache_clear()
+    try:
+        r = _try(client, "mel", PASSWORD)
+        assert "; secure" in r.headers["set-cookie"].lower()
+        out = client.post("/v1/auth/sign-out")
+        assert "; secure" in out.headers["set-cookie"].lower()
+    finally:
+        monkeypatch.delenv("DOCS_COOKIE_SECURE")
+        get_settings.cache_clear()
+
+
+def test_a_lock_is_logged(client, editor, caplog):
+    with caplog.at_level("INFO", logger="sdocs"):
+        for _ in range(5):
+            _try(client, "mel", "nope")
+    assert "sign-in locked for mel" in caplog.text
+
+
+def test_a_request_keeps_the_session_fresh(client, db, editor):
+    sign_in(client, "mel")
+    then = datetime.now(UTC) - timedelta(minutes=2)
+    db.execute(update(UserSession).values(last_seen_at=then))
+    db.commit()
+    assert client.get("/v1/auth/me").status_code == 200
+    row = db.execute(select(UserSession)).scalar_one()
+    db.refresh(row)
+    assert row.last_seen_at > then + timedelta(minutes=1)
+
+
 def test_12_hours_without_a_request_signs_you_out(client, db, editor):
     sign_in(client, "mel")
     db.execute(update(UserSession).values(last_seen_at=datetime.now(UTC) - timedelta(hours=12, minutes=1)))
@@ -1960,6 +2002,20 @@ def test_a_deactivated_persons_session_stops_working(client, db, editor):
     db.execute(update(AppUser).values(active=False))
     db.commit()
     assert client.get("/v1/auth/me").status_code == 401
+
+
+def test_a_scope_is_held_exactly_by_its_area_or_by_everything():
+    from sdocs.api.deps import Principal
+
+    def holds(scopes: list[str], scope: str) -> bool:
+        return Principal(user=None, session=None, scopes=scopes).has_scope(scope)  # type: ignore[arg-type]
+
+    assert holds(["*"], "users:write")
+    assert holds(["documents:*"], "documents:write")
+    assert holds(["documents:read"], "documents:read")
+    assert not holds(["documents:read"], "documents:write")
+    assert not holds(["documents:*"], "clients:read")
+    assert not holds([], "documents:read")
 ```
 
 **Step 2: Run it to see it fail**
@@ -2044,6 +2100,7 @@ httpOnly, SameSite=Strict cookie and nowhere else: the desktop's scripts
 never see it, and a script of your own keeps it in a cookie jar."""
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -2059,6 +2116,7 @@ from sdocs.models import AppUser
 from sdocs.services import access, sessions
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+log = logging.getLogger("sdocs")
 
 TRIES = 5
 LOCK = timedelta(minutes=15)
@@ -2103,8 +2161,10 @@ def signed_in(db, user: AppUser, response: Response) -> MeOut:
 
 
 @router.post("/sign-in", response_model=MeOut)
-def sign_in(body: SignInIn, db: DB, response: Response):
-    """Five wrong passwords lock the password for 15 minutes."""
+def sign_in(body: SignInIn, db: DB, response: Response,
+            token: Annotated[str | None, Cookie(alias=COOKIE)] = None):
+    """Five wrong passwords lock the password for 15 minutes. Signing in ends
+    the session this browser had, so a replaced cookie leaves nothing live."""
     # the row stays locked until this attempt is counted, so guesses sent all
     # at once are weighed one after another and cannot get past the limit
     user = db.execute(select(AppUser).where(AppUser.username == body.username.strip().lower())
@@ -2124,6 +2184,7 @@ def sign_in(body: SignInIn, db: DB, response: Response):
             user.failed_attempts = 0
             user.locked_until = now + LOCK
             db.commit()
+            log.info("sign-in locked for %s", user.username)
             raise locked()
         db.commit()
         # no tries-left count: an unknown username could not say it without giving itself away
@@ -2133,6 +2194,8 @@ def sign_in(body: SignInIn, db: DB, response: Response):
         user.password_hash = access.hash_password(body.password)
     user.failed_attempts = 0
     user.locked_until = None
+    if token:
+        sessions.end(db, token)
     return signed_in(db, user, response)
 
 
@@ -2164,7 +2227,7 @@ v1.include_router(auth.router)
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_auth.py -v`
-Expected: `12 passed`.
+Expected: `17 passed`.
 
 **Step 5: Commit**
 
@@ -2193,9 +2256,9 @@ git commit -m "Sign in with a username and password into an httpOnly, SameSite=S
 every other app on localhost is the same site. A page can't add a header of
 its own to another origin's request without the browser asking first, and
 this API never answers that question, so the header closes the gap."""
+from conftest import PASSWORD, sign_in
 from fastapi.testclient import TestClient
 
-from conftest import PASSWORD, sign_in
 from sdocs.api.app import app
 
 REFUSED = {"error": {"code": "header_required", "message":
@@ -2210,8 +2273,17 @@ def test_a_change_without_the_header_is_refused(engine, editor):
         assert getattr(bare, method)("/v1/anything").json() == REFUSED
 
 
+def test_any_other_value_or_method_is_refused(engine):
+    bare = TestClient(app)
+    assert bare.post("/v1/auth/sign-out", headers={"X-Simple-Docs": "0"}).json() == REFUSED
+    assert bare.request("PROPFIND", "/v1/anything").json() == REFUSED
+
+
 def test_reading_needs_no_header(engine):
-    assert TestClient(app).get("/v1/health").status_code == 200
+    bare = TestClient(app)
+    assert bare.get("/v1/health").status_code == 200
+    assert bare.head("/v1/health").status_code != 403
+    assert bare.options("/v1/health").status_code != 403
 
 
 def test_with_the_header_it_goes_through(client, editor):
@@ -2231,7 +2303,12 @@ Expected: FAIL in `test_a_change_without_the_header_is_refused`: `assert 200 == 
 session cookie is SameSite=Strict, but every other app on this machine's
 localhost counts as the same site; a page can't add this header to a request
 for another origin without a CORS preflight, which this API never answers.
-Reading needs no header."""
+Reading (GET, HEAD, OPTIONS) needs no header; every other method does.
+
+Browsers send localhost's cookies to every port on localhost, so any other
+server running on this machine sees the session cookie. That is fine for one
+person's own machine; for anything more, serve Simple Docs on its own
+hostname over https with DOCS_COOKIE_SECURE=true."""
 from __future__ import annotations
 
 from starlette.responses import JSONResponse
@@ -2240,7 +2317,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from sdocs.api.errors import body
 
 HEADER = b"x-simple-docs"
-UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
+SAFE = {"GET", "HEAD", "OPTIONS"}
 
 
 class SameSiteOnly:
@@ -2248,7 +2325,7 @@ class SameSiteOnly:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and scope["method"] in UNSAFE:
+        if scope["type"] == "http" and scope["method"] not in SAFE:
             if dict(scope["headers"]).get(HEADER) != b"1":
                 response = JSONResponse(status_code=403, content=body(
                     "header_required",
