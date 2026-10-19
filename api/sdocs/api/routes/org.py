@@ -7,11 +7,13 @@ from __future__ import annotations
 import re
 from typing import Annotated
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Body, Header, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from sdocs.api.deps import DB, Principal, Who, require
+from sdocs.api.errors import ApiError, invalid
 from sdocs.api.schemas import Name, no_control_chars
+from sdocs.models import OrgLogo
 from sdocs.services import settings
 
 router = APIRouter(prefix="/settings/org", tags=["settings"])
@@ -94,3 +96,36 @@ def put_org(body: OrgIn, db: DB, who: Admin):
     settings.write(db, {f"org.{f}": getattr(body, f) for f in FIELDS}, who.user)
     db.commit()
     return org_out(db)
+
+
+MAX_LOGO = 512 * 1024
+# what each kind's bytes start with: the header alone is only a claim
+SIGNATURES = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8\xff"}
+
+
+@router.put("/logo", status_code=204)
+def put_logo(content: Annotated[bytes, Body(media_type="image/png")], db: DB, who: Admin,
+             content_type: Annotated[str | None, Header()] = None):
+    """The logo is the request's body, sent as image/png or image/jpeg. SVG
+    is refused: it can carry script."""
+    mime = (content_type or "").split(";")[0].strip().lower()
+    if mime not in SIGNATURES:
+        raise ApiError(415, "unsupported_type", "Use a PNG or JPEG for the logo.")
+    if len(content) > MAX_LOGO:
+        raise ApiError(413, "too_large", "The logo can be 512 KB at most.")
+    if not content.startswith(SIGNATURES[mime]):
+        raise invalid("logo", "That file isn't the PNG or JPEG it says it is.")
+    logo = OrgLogo(mime=mime, content=content, created_by=who.user.id)
+    db.add(logo)
+    db.flush()
+    settings.write(db, {settings.ORG_LOGO: str(logo.id)}, who.user)
+    db.commit()
+    return Response(status_code=204)
+
+
+@router.delete("/logo", status_code=204)
+def remove_logo(db: DB, who: Admin):
+    """Back to the Simple Docs mark. The old logo's row stays."""
+    settings.write(db, {settings.ORG_LOGO: None}, who.user)
+    db.commit()
+    return Response(status_code=204)
