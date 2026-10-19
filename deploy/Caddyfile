@@ -30,8 +30,10 @@
 	# missing one is a 404, never the app's page.
 	handle /assets/* {
 		header Content-Security-Policy "default-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
-		header Cache-Control "public, max-age=31536000, immutable"
 		root * /srv/desktop
+		# only a file that exists is kept for a year: a 404 must be asked for again
+		@exists file
+		header @exists Cache-Control "public, max-age=31536000, immutable"
 		file_server
 	}
 
