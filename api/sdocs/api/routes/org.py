@@ -23,6 +23,7 @@ Admin = Annotated[Principal, require("settings:write")]
 FIELDS = ("name", "abn", "phone", "email", "address")
 ABN_WEIGHTS = (10, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19)
 DIGITS = "0123456789"
+ABN_SEPARATORS = " -."
 EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 
 
@@ -43,7 +44,7 @@ def org_out(db) -> OrgOut:
 def normal_abn(value: str) -> str:
     """11 digits that pass the ATO's check, written 51 824 753 556."""
     digits = "".join(c for c in value if c in DIGITS)
-    if len(digits) != 11 or any(c not in DIGITS + " " for c in value):
+    if len(digits) != 11 or any(c not in DIGITS + ABN_SEPARATORS for c in value):
         raise ValueError("An ABN is 11 digits, e.g. 51 824 753 556.")
     weighted = [int(d) for d in digits]
     weighted[0] -= 1
@@ -60,16 +61,28 @@ class OrgIn(BaseModel):
     email: str | None = Field(default=None, max_length=254)
     address: str | None = Field(default=None, max_length=300)
 
-    # runs before the checks below (pydantic runs a field's validators in order)
-    @field_validator("abn", "phone", "email", "address")
+    # these two run before the checks below (pydantic runs a field's
+    # validators in order)
+    @field_validator("abn", "phone", "email")
     @classmethod
-    def _tidy(cls, value: str | None) -> str | None:
-        """Spaces tidied on each line, blank lines dropped, control characters
-        refused; blank is None."""
+    def _one_line(cls, value: str | None) -> str | None:
+        """One line: spaces (newlines too) tidied to single spaces, control
+        characters refused; blank is None."""
         if value is None:
             return None
-        lines = (" ".join(line.split()) for line in value.splitlines())
-        return "\n".join(no_control_chars(line) for line in lines if line) or None
+        return no_control_chars(" ".join(value.split())) or None
+
+    @field_validator("address")
+    @classmethod
+    def _lines(cls, value: str | None) -> str | None:
+        """Lines split at newlines only (CR LF and CR count as one), spaces
+        tidied within each, blank lines dropped, control characters refused;
+        blank is None."""
+        if value is None:
+            return None
+        lines = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        tidied = (" ".join(line.split()) for line in lines)
+        return "\n".join(no_control_chars(line) for line in tidied if line) or None
 
     @field_validator("abn")
     @classmethod
@@ -103,7 +116,11 @@ MAX_LOGO = 512 * 1024
 SIGNATURES = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8\xff"}
 
 
-@router.put("/logo", status_code=204)
+BINARY = {"schema": {"type": "string", "format": "binary"}}
+
+
+@router.put("/logo", status_code=204, openapi_extra={"requestBody": {
+    "required": True, "content": {mime: BINARY for mime in SIGNATURES}}})
 def put_logo(content: Annotated[bytes, Body(media_type="image/png")], db: DB, who: Admin,
              content_type: Annotated[str | None, Header()] = None):
     """The logo is the request's body, sent as image/png or image/jpeg. SVG

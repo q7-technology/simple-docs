@@ -29,9 +29,10 @@ def new_password(value: str) -> str:
 
 def no_control_chars(value: str) -> str:
     """Refuses control characters (NUL and the like), which PostgreSQL can't
-    store and nobody types. Run it after spaces are tidied: tabs and newlines
-    are control characters too."""
-    if any(unicodedata.category(c) == "Cc" for c in value):
+    store and nobody types, and invisible format characters (zero-width
+    spaces, direction overrides), which make text read other than it is. Run
+    it after spaces are tidied: tabs and newlines are control characters too."""
+    if any(unicodedata.category(c) in ("Cc", "Cf") for c in value):
         raise ValueError("Use letters, numbers and punctuation only.")
     return value
 

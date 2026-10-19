@@ -2526,9 +2526,10 @@ def new_password(value: str) -> str:
 
 def no_control_chars(value: str) -> str:
     """Refuses control characters (NUL and the like), which PostgreSQL can't
-    store and nobody types. Run it after spaces are tidied: tabs and newlines
-    are control characters too."""
-    if any(unicodedata.category(c) == "Cc" for c in value):
+    store and nobody types, and invisible format characters (zero-width
+    spaces, direction overrides), which make text read other than it is. Run
+    it after spaces are tidied: tabs and newlines are control characters too."""
+    if any(unicodedata.category(c) in ("Cc", "Cf") for c in value):
         raise ValueError("Use letters, numbers and punctuation only.")
     return value
 
@@ -2625,7 +2626,7 @@ v1.include_router(setup.router)
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_setup.py -v`
-Expected: `7 passed`.
+Expected: `11 passed`.
 
 **Step 5: Commit**
 
@@ -3357,6 +3358,32 @@ def test_only_an_admin_changes_them(editor_client):
 
 def test_reading_them_needs_a_session(client):
     assert client.get("/v1/settings/org").status_code == 401
+
+
+def test_one_line_details_stay_on_one_line(admin_client):
+    r = admin_client.put("/v1/settings/org", json={**ACME, "phone": "03 9000\n0000"})
+    assert r.json()["phone"] == "03 9000 0000"
+
+
+def test_only_a_newline_starts_a_new_address_line(admin_client):
+    r = admin_client.put("/v1/settings/org",
+                         json={**ACME, "address": "1 Collins\x85Street\r\nMelbourne\rVIC"})
+    assert r.json()["address"] == "1 Collins Street\nMelbourne\nVIC"
+
+
+def test_invisible_and_direction_characters_are_refused(admin_client):
+    r = admin_client.put("/v1/settings/org", json={**ACME, "name": "Acme\u202e",
+                                                   "phone": "03\u200b9000 0000"})
+    assert r.status_code == 422
+    assert r.json()["error"]["fields"] == {
+        "name": "Use letters, numbers and punctuation only.",
+        "phone": "Use letters, numbers and punctuation only."}
+
+
+def test_an_abn_may_be_written_with_hyphens_or_dots(admin_client):
+    for written in ("51-824-753-556", "51.824.753.556"):
+        r = admin_client.put("/v1/settings/org", json={**ACME, "abn": written})
+        assert r.json()["abn"] == "51 824 753 556"
 ```
 
 **Step 2: Run it to see it fail**
@@ -3391,6 +3418,7 @@ Admin = Annotated[Principal, require("settings:write")]
 FIELDS = ("name", "abn", "phone", "email", "address")
 ABN_WEIGHTS = (10, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19)
 DIGITS = "0123456789"
+ABN_SEPARATORS = " -."
 EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 
 
@@ -3411,7 +3439,7 @@ def org_out(db) -> OrgOut:
 def normal_abn(value: str) -> str:
     """11 digits that pass the ATO's check, written 51 824 753 556."""
     digits = "".join(c for c in value if c in DIGITS)
-    if len(digits) != 11 or any(c not in DIGITS + " " for c in value):
+    if len(digits) != 11 or any(c not in DIGITS + ABN_SEPARATORS for c in value):
         raise ValueError("An ABN is 11 digits, e.g. 51 824 753 556.")
     weighted = [int(d) for d in digits]
     weighted[0] -= 1
@@ -3428,16 +3456,28 @@ class OrgIn(BaseModel):
     email: str | None = Field(default=None, max_length=254)
     address: str | None = Field(default=None, max_length=300)
 
-    # runs before the checks below (pydantic runs a field's validators in order)
-    @field_validator("abn", "phone", "email", "address")
+    # these two run before the checks below (pydantic runs a field's
+    # validators in order)
+    @field_validator("abn", "phone", "email")
     @classmethod
-    def _tidy(cls, value: str | None) -> str | None:
-        """Spaces tidied on each line, blank lines dropped, control characters
-        refused; blank is None."""
+    def _one_line(cls, value: str | None) -> str | None:
+        """One line: spaces (newlines too) tidied to single spaces, control
+        characters refused; blank is None."""
         if value is None:
             return None
-        lines = (" ".join(line.split()) for line in value.splitlines())
-        return "\n".join(no_control_chars(line) for line in lines if line) or None
+        return no_control_chars(" ".join(value.split())) or None
+
+    @field_validator("address")
+    @classmethod
+    def _lines(cls, value: str | None) -> str | None:
+        """Lines split at newlines only (CR LF and CR count as one), spaces
+        tidied within each, blank lines dropped, control characters refused;
+        blank is None."""
+        if value is None:
+            return None
+        lines = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        tidied = (" ".join(line.split()) for line in lines)
+        return "\n".join(no_control_chars(line) for line in tidied if line) or None
 
     @field_validator("abn")
     @classmethod
@@ -3477,7 +3517,7 @@ v1.include_router(org.router)
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_org.py -v`
-Expected: `7 passed`.
+Expected: `11 passed`.
 
 **Step 5: Commit**
 
@@ -3503,7 +3543,9 @@ git commit -m "Keep the organisation's name, ABN, phone, email and address in Se
 ```python
 from sqlalchemy import func, select
 
+from sdocs.api.app import app
 from sdocs.models import OrgLogo
+from sdocs.services import settings
 
 # Only the first bytes are checked, so a signature and padding will do here
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
@@ -3554,6 +3596,35 @@ def test_a_logo_over_512_kb_is_refused(admin_client):
     assert r.status_code == 413 and r.json()["error"]["code"] == "too_large"
 
 
+def test_a_logo_of_exactly_512_kb_is_accepted(admin_client):
+    exactly = PNG + b"\x00" * (512 * 1024 - len(PNG))
+    assert _upload(admin_client, exactly).status_code == 204
+
+
+def test_the_logo_is_asked_for_again_cheaply(admin_client, client):
+    _upload(admin_client, PNG)
+    logo_id = client.get("/v1/branding").json()["logo_id"]
+    r = client.get("/v1/branding/logo")
+    assert r.headers["etag"] == f'"{logo_id}"'
+    r = client.get("/v1/branding/logo", headers={"If-None-Match": f'"{logo_id}"'})
+    assert r.status_code == 304 and r.content == b"" and r.headers["etag"] == f'"{logo_id}"'
+    r = client.get("/v1/branding/logo", headers={"If-None-Match": '"something-else"'})
+    assert r.status_code == 200 and r.content == PNG
+
+
+def test_a_damaged_logo_setting_is_no_logo(admin, client, db):
+    settings.write(db, {settings.ORG_LOGO: "not-a-uuid"}, admin)
+    db.commit()
+    r = client.get("/v1/branding/logo")
+    assert r.status_code == 404 and r.json()["error"]["code"] == "not_found"
+
+
+def test_the_api_description_names_both_kinds_of_logo():
+    body = app.openapi()["paths"]["/v1/settings/org/logo"]["put"]["requestBody"]
+    assert set(body["content"]) == {"image/png", "image/jpeg"}
+    assert body["content"]["image/jpeg"]["schema"] == {"type": "string", "format": "binary"}
+
+
 def test_removing_the_logo_goes_back_to_the_mark(admin_client, client):
     _upload(admin_client, PNG)
     assert admin_client.delete("/v1/settings/org/logo").status_code == 204
@@ -3591,7 +3662,11 @@ MAX_LOGO = 512 * 1024
 SIGNATURES = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8\xff"}
 
 
-@router.put("/logo", status_code=204)
+BINARY = {"schema": {"type": "string", "format": "binary"}}
+
+
+@router.put("/logo", status_code=204, openapi_extra={"requestBody": {
+    "required": True, "content": {mime: BINARY for mime in SIGNATURES}}})
 def put_logo(content: Annotated[bytes, Body(media_type="image/png")], db: DB, who: Admin,
              content_type: Annotated[str | None, Header()] = None):
     """The logo is the request's body, sent as image/png or image/jpeg. SVG
@@ -3619,8 +3694,9 @@ def remove_logo(db: DB, who: Admin):
     return Response(status_code=204)
 ```
 
-In `api/sdocs/api/routes/setup.py`, add `import uuid` after `from __future__ import annotations`, and change two imports:
+In `api/sdocs/api/routes/setup.py`, add `import uuid` and `from typing import Annotated` after `from __future__ import annotations`, and change three imports:
 ```python
+from fastapi import APIRouter, Header, Response
 from sdocs.api.errors import ApiError, not_found
 from sdocs.models import AppUser, OrgLogo
 ```
@@ -3628,25 +3704,41 @@ and append:
 ```python
 
 
-@router.get("/branding/logo")
-def logo(db: DB):
-    """The organisation's logo. Needs no session: the sign-in page shows it."""
+def logo_in_use(db: Db) -> OrgLogo | None:
+    """The logo the org.logo setting names; a damaged setting is no logo."""
     logo_id = settings.read(db, (settings.ORG_LOGO,))[settings.ORG_LOGO]
-    row = db.get(OrgLogo, uuid.UUID(logo_id)) if logo_id else None
+    try:
+        return db.get(OrgLogo, uuid.UUID(logo_id)) if isinstance(logo_id, str) else None
+    except ValueError:
+        return None
+
+
+@router.get("/branding/logo")
+def logo(db: DB, if_none_match: Annotated[str | None, Header()] = None):
+    """The organisation's logo. Needs no session: the sign-in page shows it."""
+    row = logo_in_use(db)
     if row is None:
         raise not_found("There's no logo. Simple Docs shows its own mark instead.")
-    return Response(row.content, media_type=row.mime, headers={
-        # the address stays the same across uploads; the page asks each time
+    # a logo's row never changes, so its id is its version
+    etag = f'"{row.id}"'
+    headers = {
+        # the address stays the same across uploads; the page asks each time,
+        # and gets 304 while the logo is the one it has
         "Cache-Control": "no-cache",
+        "ETag": etag,
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'",
-    })
+    }
+    seen = {tag.strip().removeprefix("W/") for tag in (if_none_match or "").split(",")}
+    if etag in seen or "*" in seen:
+        return Response(status_code=304, headers=headers)
+    return Response(row.content, media_type=row.mime, headers=headers)
 ```
 
 **Step 4: Run it to see it pass**
 
 Run: `cd api && .venv/bin/pytest tests/test_logo.py tests/test_org.py tests/test_setup.py -v`
-Expected: `18 passed`.
+Expected: `29 passed`.
 
 **Step 5: Commit**
 
@@ -7075,11 +7167,13 @@ git commit -m "Let anyone change their own password from their account page" \
 		-Server
 	}
 
-	# The API is the only door: /api/v1/... reaches it as /v1/... Bodies are
-	# JSON or, at most, a 512 KB logo; Caddy refuses anything silly first.
+	# The API is the only door: /api/v1/... reaches it as /v1/... Step 1's
+	# bodies are JSON or a logo (the API refuses one over 512 KB); Caddy
+	# refuses anything over 1MB before it reaches the API. Later steps raise
+	# this where they take uploads.
 	handle_path /api/* {
 		request_body {
-			max_size 16MB
+			max_size 1MB
 		}
 		reverse_proxy api:8000
 	}

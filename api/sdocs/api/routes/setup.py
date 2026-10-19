@@ -5,8 +5,9 @@ exists, first run is refused for good; the way back in after that is
 from __future__ import annotations
 
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Header, Response
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session as Db
@@ -65,16 +66,32 @@ def setup(body: SetupIn, db: DB, response: Response):
     return signed_in(db, admin, response)
 
 
-@router.get("/branding/logo")
-def logo(db: DB):
-    """The organisation's logo. Needs no session: the sign-in page shows it."""
+def logo_in_use(db: Db) -> OrgLogo | None:
+    """The logo the org.logo setting names; a damaged setting is no logo."""
     logo_id = settings.read(db, (settings.ORG_LOGO,))[settings.ORG_LOGO]
-    row = db.get(OrgLogo, uuid.UUID(logo_id)) if logo_id else None
+    try:
+        return db.get(OrgLogo, uuid.UUID(logo_id)) if isinstance(logo_id, str) else None
+    except ValueError:
+        return None
+
+
+@router.get("/branding/logo")
+def logo(db: DB, if_none_match: Annotated[str | None, Header()] = None):
+    """The organisation's logo. Needs no session: the sign-in page shows it."""
+    row = logo_in_use(db)
     if row is None:
         raise not_found("There's no logo. Simple Docs shows its own mark instead.")
-    return Response(row.content, media_type=row.mime, headers={
-        # the address stays the same across uploads; the page asks each time
+    # a logo's row never changes, so its id is its version
+    etag = f'"{row.id}"'
+    headers = {
+        # the address stays the same across uploads; the page asks each time,
+        # and gets 304 while the logo is the one it has
         "Cache-Control": "no-cache",
+        "ETag": etag,
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'",
-    })
+    }
+    seen = {tag.strip().removeprefix("W/") for tag in (if_none_match or "").split(",")}
+    if etag in seen or "*" in seen:
+        return Response(status_code=304, headers=headers)
+    return Response(row.content, media_type=row.mime, headers=headers)

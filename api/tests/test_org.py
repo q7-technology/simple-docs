@@ -57,3 +57,29 @@ def test_only_an_admin_changes_them(editor_client):
 
 def test_reading_them_needs_a_session(client):
     assert client.get("/v1/settings/org").status_code == 401
+
+
+def test_one_line_details_stay_on_one_line(admin_client):
+    r = admin_client.put("/v1/settings/org", json={**ACME, "phone": "03 9000\n0000"})
+    assert r.json()["phone"] == "03 9000 0000"
+
+
+def test_only_a_newline_starts_a_new_address_line(admin_client):
+    r = admin_client.put("/v1/settings/org",
+                         json={**ACME, "address": "1 Collins\x85Street\r\nMelbourne\rVIC"})
+    assert r.json()["address"] == "1 Collins Street\nMelbourne\nVIC"
+
+
+def test_invisible_and_direction_characters_are_refused(admin_client):
+    r = admin_client.put("/v1/settings/org", json={**ACME, "name": "Acme\u202e",
+                                                   "phone": "03\u200b9000 0000"})
+    assert r.status_code == 422
+    assert r.json()["error"]["fields"] == {
+        "name": "Use letters, numbers and punctuation only.",
+        "phone": "Use letters, numbers and punctuation only."}
+
+
+def test_an_abn_may_be_written_with_hyphens_or_dots(admin_client):
+    for written in ("51-824-753-556", "51.824.753.556"):
+        r = admin_client.put("/v1/settings/org", json={**ACME, "abn": written})
+        assert r.json()["abn"] == "51 824 753 556"
