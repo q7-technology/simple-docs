@@ -5,6 +5,7 @@ from sqlalchemy import text
 
 from sdocs.api import errors
 from sdocs.api.deps import DB
+from sdocs.api.guard import SameSiteOnly
 from sdocs.api.routes import auth
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -17,6 +18,7 @@ app = FastAPI(
     redoc_url=None,
 )
 errors.install(app)
+app.add_middleware(SameSiteOnly)
 
 v1 = APIRouter(prefix="/v1")
 
