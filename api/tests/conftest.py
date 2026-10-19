@@ -98,3 +98,35 @@ def all_at_once(n: int, call):
 
     with ThreadPoolExecutor(max_workers=n) as pool:
         return [f.result() for f in [pool.submit(one) for _ in range(n)]]
+
+
+# --- people -----------------------------------------------------------------
+
+PASSWORD = "correct horse battery"
+
+
+def make_user(db, username: str, display_name: str, role: str = "editor", *,
+              password: str = PASSWORD, active: bool = True):
+    from sdocs.models import AppUser
+    from sdocs.services.access import hash_password
+
+    user = AppUser(username=username, display_name=display_name, role=role, active=active,
+                   password_hash=hash_password(password))
+    db.add(user)
+    db.commit()
+    return user
+
+
+@pytest.fixture
+def admin(db):
+    return make_user(db, "leighton", "Leighton Lauton", "admin")
+
+
+@pytest.fixture
+def editor(db):
+    return make_user(db, "mel", "Mel Grant", "editor")
+
+
+@pytest.fixture
+def reviewer(db):
+    return make_user(db, "sam", "Sam Vu", "reviewer")
