@@ -7,7 +7,7 @@ import { AuthFrame } from "../ui/AuthFrame";
 import { Button } from "../ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/Card";
 import { TextField } from "../ui/Field";
-import { Notice } from "../ui/Notice";
+import { LiveNotices } from "../ui/Notice";
 import { OrgMark } from "../ui/OrgMark";
 
 export function SignIn() {
@@ -46,8 +46,7 @@ export function SignIn() {
         </CardHeader>
         <CardContent>
           <form onSubmit={submit} noValidate className="flex flex-col gap-4">
-            {from && !problem && <Notice tone="info">You're signed out. Sign in again.</Notice>}
-            {problem && <Notice>{problem}</Notice>}
+            <LiveNotices tone="info" said={from && !problem ? "You're signed out. Sign in again." : null} problem={problem} />
             <TextField label="Username" name="username" autoComplete="username" autoCapitalize="none"
                        spellCheck={false} value={username} onChange={(e) => setUsername(e.target.value)} required />
             <TextField label="Password" name="password" type="password" autoComplete="current-password"

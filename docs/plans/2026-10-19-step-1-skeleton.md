@@ -4748,7 +4748,7 @@ import { Button } from "../ui/Button";
 import { Card, CardTitle } from "../ui/Card";
 import { Chip } from "../ui/Chip";
 import { TextField } from "../ui/Field";
-import { Notice } from "../ui/Notice";
+import { LiveNotices, Notice } from "../ui/Notice";
 import { SectionHeading } from "../ui/SectionHeading";
 
 describe("the Q7 components", () => {
@@ -4809,6 +4809,21 @@ describe("the Q7 components", () => {
     render(<><Notice>Wrong username or password.</Notice><Notice tone="success">Saved.</Notice></>);
     expect(screen.getByRole("alert")).toHaveTextContent("Wrong username or password.");
     expect(screen.getByRole("status")).toHaveTextContent("Saved.");
+  });
+
+  it("keeps a live status in place before there is anything to say, and changes its words", () => {
+    const { rerender } = render(<LiveNotices said={null} problem={null} />);
+    const status = screen.getByRole("status");
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toHaveAttribute("aria-atomic", "true");
+    expect(status).toBeEmptyDOMElement();
+    expect(screen.queryByRole("alert")).toBeNull();
+    rerender(<LiveNotices said="Saved." problem={null} />);
+    expect(screen.getByRole("status")).toBe(status);
+    expect(status).toHaveTextContent("Saved.");
+    rerender(<LiveNotices said={null} problem="Can't reach Simple Docs right now." />);
+    expect(status).toBeEmptyDOMElement();
+    expect(screen.getByRole("alert")).toHaveTextContent("Can't reach Simple Docs right now.");
   });
 
   it("gives a badge its word in its own casing", () => {
@@ -5134,18 +5149,44 @@ const looks: Record<Tone, string> = {
 
 const icons = { warning: TriangleAlert, success: CircleCheck, info: Info };
 
-/** A message in the SimulatedNotice's frame. A warning is an alert, read out
- * at once; a success or a note is a status. Icon and words, never colour alone. */
-export function Notice({ tone = "warning", className, children }: { tone?: Tone; className?: string; children: ReactNode }) {
+/** The frame, the icon and the words, with no role of its own. */
+function Box({ tone, className, children }: { tone: Tone; className?: string; children: ReactNode }) {
   const Icon = icons[tone];
   return (
-    <div
-      role={tone === "warning" ? "alert" : "status"}
-      className={cn("flex items-start gap-3 rounded-xl border p-4 text-body-sm text-space-lightGray", looks[tone], className)}
-    >
+    <div className={cn("flex items-start gap-3 rounded-xl border p-4 text-body-sm text-space-lightGray", looks[tone], className)}>
       <Icon aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
       <div>{children}</div>
     </div>
+  );
+}
+
+/** A message in the SimulatedNotice's frame. A warning is an alert, read out
+ * at once; a success or a note is a status. Icon and words, never colour alone. */
+export function Notice({ tone = "warning", className, children }: { tone?: Tone; className?: string; children: ReactNode }) {
+  return (
+    <div role={tone === "warning" ? "alert" : "status"} className={className}>
+      <Box tone={tone}>{children}</Box>
+    </div>
+  );
+}
+
+/** What a page says after you do something. The status is always in the page,
+ * so a screen reader is listening before its words change (one added with
+ * its words already in it is often missed); out of the flow while it is
+ * empty. Trouble is an alert, added when there is some. Clear `said` before
+ * saying something new, so the same words twice are read twice. */
+export function LiveNotices({ said, problem, tone = "success" }: {
+  said: string | null;
+  problem: string | null;
+  tone?: "success" | "info";
+}) {
+  return (
+    <>
+      <div role="status" aria-live="polite" aria-atomic="true" className={said ? undefined : "sr-only"}>
+        {said && <Box tone={tone}>{said}</Box>}
+      </div>
+      {problem && <Notice>{problem}</Notice>}
+    </>
   );
 }
 ```
@@ -5153,7 +5194,7 @@ export function Notice({ tone = "warning", className, children }: { tone?: Tone;
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `16 passed` (6 theme, 10 components).
+Expected: `17 passed` (6 theme, 11 components).
 
 Run: `cd apps/desktop && npm run build && grep -c "max-width:768px" dist/assets/*.css && grep -c "65ch" dist/assets/*.css`
 Expected: `1` then `0`: SectionHeading's `max-w-measure` is the token's 768px, and nothing built Tailwind's own 65ch `max-w-prose`.
@@ -5350,7 +5391,7 @@ export function OrgMark({ logoId, size = 32 }: { logoId: string | null; size?: n
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `20 passed`.
+Expected: `21 passed`.
 
 **Step 5: Commit**
 
@@ -5667,7 +5708,7 @@ export const api = new ApiClient();
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `31 passed`.
+Expected: `32 passed`.
 
 **Step 5: Commit**
 
@@ -5691,7 +5732,7 @@ git commit -m "Give the desktop an API client: the session cookie, X-Simple-Docs
 
 `apps/desktop/src/test/harness.tsx`:
 ```tsx
-import { render } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { useEffect } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { AppRoutes } from "../App";
@@ -5759,6 +5800,7 @@ function Where() {
   useEffect(() => {
     visited.push(pathname);
   }, [pathname]);
+  // a div, not an output: an output is a status, and the pages under test have their own
   return <div data-testid="where">{pathname}</div>;
 }
 
@@ -5772,6 +5814,12 @@ export function renderApp(path: string) {
       </AuthProvider>
     </MemoryRouter>,
   );
+}
+
+/** The page's status says `text`. The live region is always there, so a
+ * screen reader hears it change: wait for its words, not for it. */
+export async function said(text: string) {
+  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(text));
 }
 ```
 
@@ -6002,6 +6050,8 @@ interface AuthState {
   trouble: string | null;
   retry: () => void;
   reloadBranding: () => Promise<void>;
+  /** Asks again who is signed in, after your own role changes; signed out is null. */
+  refreshMe: () => Promise<void>;
   signIn: (username: string, password: string) => Promise<void>;
   setUp: (form: SetUpForm) => Promise<void>;
   /** Throws, still signed in, only when Simple Docs can't be reached. */
@@ -6064,6 +6114,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setBranding(await api.get<Branding>("/v1/branding"));
   }, []);
 
+  const refreshMe = useCallback(async () => {
+    try {
+      setMe(await api.get<Me>("/v1/auth/me"));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) setMe(null);
+      else throw e;
+    }
+  }, []);
+
   const signIn = useCallback(async (username: string, password: string) => {
     setMe(await api.post<Me>("/v1/auth/sign-in", { username, password }));
     setTrouble(null);
@@ -6096,8 +6155,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [me]);
 
   const value = useMemo(
-    () => ({ ready, branding, me, trouble, retry, reloadBranding, signIn, setUp, signOut, can }),
-    [ready, branding, me, trouble, retry, reloadBranding, signIn, setUp, signOut, can],
+    () => ({ ready, branding, me, trouble, retry, reloadBranding, refreshMe, signIn, setUp, signOut, can }),
+    [ready, branding, me, trouble, retry, reloadBranding, refreshMe, signIn, setUp, signOut, can],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
@@ -6187,7 +6246,7 @@ import { AuthFrame } from "../ui/AuthFrame";
 import { Button } from "../ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/Card";
 import { TextField } from "../ui/Field";
-import { Notice } from "../ui/Notice";
+import { LiveNotices } from "../ui/Notice";
 import { OrgMark } from "../ui/OrgMark";
 
 export function SignIn() {
@@ -6226,8 +6285,7 @@ export function SignIn() {
         </CardHeader>
         <CardContent>
           <form onSubmit={submit} noValidate className="flex flex-col gap-4">
-            {from && !problem && <Notice tone="info">You're signed out. Sign in again.</Notice>}
-            {problem && <Notice>{problem}</Notice>}
+            <LiveNotices tone="info" said={from && !problem ? "You're signed out. Sign in again." : null} problem={problem} />
             <TextField label="Username" name="username" autoComplete="username" autoCapitalize="none"
                        spellCheck={false} value={username} onChange={(e) => setUsername(e.target.value)} required />
             <TextField label="Password" name="password" type="password" autoComplete="current-password"
@@ -6252,7 +6310,7 @@ import { AuthFrame } from "../ui/AuthFrame";
 import { Button } from "../ui/Button";
 import { Card, CardContent, CardHeader } from "../ui/Card";
 import { TextField, useFocusFirstInvalid } from "../ui/Field";
-import { Notice } from "../ui/Notice";
+import { LiveNotices } from "../ui/Notice";
 import { SectionHeading } from "../ui/SectionHeading";
 import { SimpleDocsMark } from "../ui/SimpleDocsMark";
 
@@ -6316,7 +6374,7 @@ export function SetUp() {
         </CardHeader>
         <CardContent>
           <form ref={formRef} onSubmit={submit} noValidate className="flex flex-col gap-4">
-            {problem && <Notice>{problem}</Notice>}
+            <LiveNotices said={null} problem={problem} />
             <TextField label="Organisation" hint="As your documents should name it." autoComplete="organization"
                        value={form.org_name} onChange={set("org_name")} error={fields.org_name} required />
             <TextField label="Your name" autoComplete="name" value={form.display_name}
@@ -6383,7 +6441,7 @@ export function App() {
 **Step 4: Run them to see them pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `48 passed`.
+Expected: `49 passed`.
 
 **Step 5: Commit**
 
@@ -6739,7 +6797,7 @@ export function AppRoutes() {
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `61 passed`.
+Expected: `62 passed`.
 
 **Step 5: Commit**
 
@@ -6767,7 +6825,7 @@ git commit -m "Give the desktop its shell: a skip link, the design's navbar and 
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { User } from "../api/types";
-import { apiError, json, MEL, renderApp, stubApi, type Handler } from "./harness";
+import { ADA, apiError, json, MEL, renderApp, said, stubApi, type Handler } from "./harness";
 
 const USERS: User[] = [
   { id: "u-ada", username: "ada", display_name: "Ada Admin", role: "admin", active: true, locked: false,
@@ -6797,11 +6855,20 @@ async function addSomeone(name: string, username: string, role: string, password
   return form;
 }
 
+/** An answer held back until the test lets it go. */
+function later() {
+  let letGo: (r: Response) => void = () => {};
+  const answer = new Promise<Response>((resolve) => {
+    letGo = resolve;
+  });
+  return { answer, letGo: (r: Response) => letGo(r) };
+}
+
 describe("Settings → Users", () => {
   it("opens Settings on Users and lists everyone with their role and state", async () => {
     usersApi();
     renderApp("/settings");
-    const table = await screen.findByRole("table");
+    const table = await screen.findByRole("table", { name: "People who sign in" });
     expect(screen.getByTestId("where")).toHaveTextContent("/settings/users");
     const rows = within(table).getAllByRole("row").slice(1);
     expect(rows.map((r) => within(r).getByRole("rowheader").textContent)).toEqual(["Ada Admin", "Mel Grant", "Old Timer"]);
@@ -6810,14 +6877,46 @@ describe("Settings → Users", () => {
     expect(screen.getByLabelText("Role for Mel Grant")).toHaveValue("editor");
   });
 
+  it("says when the list can't be loaded, and tries again", async () => {
+    let failed = false;
+    usersApi((method, url) => {
+      if (method === "GET" && url === "/api/v1/users" && !failed) {
+        failed = true;
+        return apiError(500, "internal", "Something broke on our side.");
+      }
+      return null;
+    });
+    renderApp("/settings/users");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load the people who sign in.");
+    expect(screen.queryByText("Loading…")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("table", { name: "People who sign in" })).toBeInTheDocument();
+  });
+
   it("adds someone", async () => {
     const { calls } = usersApi((method, url) =>
       method === "POST" && url === "/api/v1/users" ? json(201, USERS[1]) : null);
     renderApp("/settings/users");
     await addSomeone("Kim Lee", "kim", "reviewer", "another long password");
-    expect(await screen.findByRole("status")).toHaveTextContent("Kim Lee can sign in now.");
+    await said("Kim Lee can sign in now.");
     expect(calls.find((c) => c.method === "POST" && c.url === "/api/v1/users")?.body).toEqual({
       display_name: "Kim Lee", username: "kim", role: "reviewer", password: "another long password" });
+  });
+
+  it("adds someone once, however quickly Add is clicked twice", async () => {
+    const held = later();
+    const { calls } = usersApi((method, url) =>
+      method === "POST" && url === "/api/v1/users" ? held.answer : null);
+    renderApp("/settings/users");
+    const form = await screen.findByRole("form", { name: "Add someone" });
+    await userEvent.type(within(form).getByLabelText("Name"), "Kim Lee");
+    await userEvent.type(within(form).getByLabelText("Username"), "kim");
+    await userEvent.type(within(form).getByLabelText("Password"), "another long password");
+    await userEvent.dblClick(within(form).getByRole("button", { name: "Add" }));
+    expect(within(form).getByRole("button", { name: "Adding…" })).toBeDisabled();
+    held.letGo(json(201, USERS[1]));
+    await said("Kim Lee can sign in now.");
+    expect(calls.filter((c) => c.method === "POST" && c.url === "/api/v1/users")).toHaveLength(1);
   });
 
   it("shows what is wrong beside the field", async () => {
@@ -6827,24 +6926,103 @@ describe("Settings → Users", () => {
     const form = await addSomeone("Mel Two", "mel", "editor", "another long password");
     expect(await within(form).findByText("That username is taken.")).toBeInTheDocument();
     expect(within(form).getByLabelText("Username")).toHaveAttribute("aria-invalid", "true");
+    expect(within(form).getByLabelText("Username")).toHaveFocus();
   });
 
   it("changes someone's role", async () => {
     const { calls } = usersApi((method) => method === "PATCH" ? json(200, { ...USERS[1], role: "reviewer" }) : null);
     renderApp("/settings/users");
     await userEvent.selectOptions(await screen.findByLabelText("Role for Mel Grant"), "reviewer");
-    expect(await screen.findByRole("status")).toHaveTextContent("Mel Grant is a reviewer now.");
+    await said("Mel Grant is a reviewer now.");
     expect(calls.find((c) => c.method === "PATCH")).toMatchObject({ url: "/api/v1/users/u-mel", body: { role: "reviewer" } });
   });
 
-  it("deactivates and brings back, but never offers to deactivate you", async () => {
-    const { calls } = usersApi((method) => method === "PATCH" ? json(200, USERS[1]) : null);
+  it("shows the new role while it saves, and sends one change at a time", async () => {
+    const held = later();
+    const { calls } = usersApi((method) => method === "PATCH" ? held.answer : null);
+    renderApp("/settings/users");
+    const select = await screen.findByLabelText("Role for Mel Grant");
+    await userEvent.selectOptions(select, "reviewer");
+    expect(select).toHaveValue("reviewer");
+    expect(select).toBeEnabled();
+    expect(select.closest("tr")).toHaveAttribute("aria-busy", "true");
+    await userEvent.selectOptions(select, "admin");
+    expect(select).toHaveValue("reviewer");
+    held.letGo(json(200, { ...USERS[1], role: "reviewer" }));
+    await said("Mel Grant is a reviewer now.");
+    await waitFor(() => expect(select.closest("tr")).not.toHaveAttribute("aria-busy"));
+    expect(calls.filter((c) => c.method === "PATCH")).toHaveLength(1);
+  });
+
+  it("asks before you give up admin, and then takes you out of Settings", async () => {
+    let demoted = false;
+    const { calls } = usersApi((method, url) => {
+      if (method === "PATCH" && url === "/api/v1/users/u-ada") {
+        demoted = true;
+        return json(200, { ...USERS[0], role: "editor" });
+      }
+      if (demoted && url === "/api/v1/auth/me") return json(200, { ...ADA, role: "editor", scopes: MEL.scopes });
+      return null;
+    });
+    renderApp("/settings/users");
+    await userEvent.selectOptions(await screen.findByLabelText("Role for Ada Admin"), "editor");
+    expect(screen.getByRole("group", { name: "You'll lose Settings. Change your role?" })).toBeInTheDocument();
+    const yes = screen.getByRole("button", { name: "Yes, change my role" });
+    expect(yes).toHaveFocus();
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    await userEvent.click(yes);
+    await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent("/documents"));
+    expect(calls.find((c) => c.method === "PATCH")?.body).toEqual({ role: "editor" });
+    // who you are is asked again; the list isn't
+    expect(calls.filter((c) => c.url === "/api/v1/users")).toHaveLength(1);
+  });
+
+  it("keeps you an admin if you think better of it", async () => {
+    const { calls } = usersApi();
+    renderApp("/settings/users");
+    await userEvent.selectOptions(await screen.findByLabelText("Role for Ada Admin"), "reviewer");
+    await userEvent.click(screen.getByRole("button", { name: "Keep admin" }));
+    expect(screen.getByLabelText("Role for Ada Admin")).toHaveValue("admin");
+    expect(screen.getByLabelText("Role for Ada Admin")).toHaveFocus();
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+  });
+
+  it("deactivates and brings back, keeping focus in the row, but never offers to deactivate you", async () => {
+    let people = USERS;
+    const { calls } = stubApi((method, url, body) => {
+      if (method === "GET" && url === "/api/v1/users") return json(200, { items: people });
+      if (method === "PATCH") {
+        const id = url.split("/").pop();
+        people = people.map((u) => (u.id === id ? { ...u, ...(body as object) } : u));
+        return json(200, people.find((u) => u.id === id));
+      }
+      return null;
+    });
     renderApp("/settings/users");
     await userEvent.click(await screen.findByRole("button", { name: "Deactivate Mel Grant" }));
-    expect(await screen.findByRole("status")).toHaveTextContent("Mel Grant is deactivated");
+    // it asks first, with the answer focused, and sends nothing until then
+    const yes = screen.getByRole("button", { name: "Yes, deactivate Mel Grant" });
+    expect(yes).toHaveFocus();
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    await userEvent.click(yes);
+    await said("Mel Grant is deactivated");
     expect(calls.find((c) => c.method === "PATCH")?.body).toEqual({ active: false });
-    expect(screen.getByRole("button", { name: "Reactivate Old Timer" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reactivate Mel Grant" })).toHaveFocus());
     expect(screen.queryByRole("button", { name: "Deactivate Ada Admin" })).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Reactivate Old Timer" }));
+    await said("Old Timer can sign in again.");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Deactivate Old Timer" })).toHaveFocus());
+  });
+
+  it("lets you think better of deactivating, and puts you back where you were", async () => {
+    const { calls } = usersApi();
+    renderApp("/settings/users");
+    const deactivate = await screen.findByRole("button", { name: "Deactivate Mel Grant" });
+    await userEvent.click(deactivate);
+    await userEvent.click(screen.getByRole("button", { name: "Keep Mel Grant" }));
+    expect(screen.getByRole("button", { name: "Deactivate Mel Grant" })).toHaveFocus();
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
   });
 
   it("says why the last admin can't step down", async () => {
@@ -6853,7 +7031,9 @@ describe("Settings → Users", () => {
       : null);
     renderApp("/settings/users");
     await userEvent.selectOptions(await screen.findByLabelText("Role for Ada Admin"), "editor");
+    await userEvent.click(screen.getByRole("button", { name: "Yes, change my role" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Simple Docs needs at least one active admin.");
+    expect(screen.getByLabelText("Role for Ada Admin")).toHaveValue("admin");
   });
 
   it("sets someone's password", async () => {
@@ -6862,10 +7042,33 @@ describe("Settings → Users", () => {
     renderApp("/settings/users");
     await userEvent.click(await screen.findByRole("button", { name: "Set password for Mel Grant" }));
     const form = screen.getByRole("form", { name: "New password for Mel Grant" });
+    expect(within(form).getByLabelText("New password")).toHaveFocus();
     await userEvent.type(within(form).getByLabelText("New password"), "a brand new password");
     await userEvent.click(within(form).getByRole("button", { name: "Save password" }));
-    expect(await screen.findByRole("status")).toHaveTextContent("Mel Grant's password is set.");
+    await said("Mel Grant's password is set.");
     expect(calls.find((c) => c.url === "/api/v1/users/u-mel/password")?.body).toEqual({ password: "a brand new password" });
+    expect(screen.queryByRole("form", { name: "New password for Mel Grant" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Set password for Mel Grant" })).toHaveFocus();
+  });
+
+  it("says trouble that isn't about the password in a notice, not beside the field", async () => {
+    usersApi((method, url) => method === "POST" && url === "/api/v1/users/u-mel/password"
+      ? apiError(404, "not_found", "That person isn't in Simple Docs any more.") : null);
+    renderApp("/settings/users");
+    await userEvent.click(await screen.findByRole("button", { name: "Set password for Mel Grant" }));
+    const form = screen.getByRole("form", { name: "New password for Mel Grant" });
+    await userEvent.type(within(form).getByLabelText("New password"), "a brand new password");
+    await userEvent.click(within(form).getByRole("button", { name: "Save password" }));
+    expect(await within(form).findByRole("alert")).toHaveTextContent("That person isn't in Simple Docs any more.");
+    expect(within(form).getByLabelText("New password")).not.toHaveAttribute("aria-invalid");
+  });
+
+  it("sends you to your account page for your own password", async () => {
+    usersApi();
+    renderApp("/settings/users");
+    await screen.findByRole("table", { name: "People who sign in" });
+    expect(screen.queryByRole("button", { name: "Set password for Ada Admin" })).toBeNull();
+    expect(screen.getByRole("link", { name: /Change it on your account page/ })).toHaveAttribute("href", "/account");
   });
 
   it("keeps Settings for admins", async () => {
@@ -6879,7 +7082,7 @@ describe("Settings → Users", () => {
 **Step 2: Run it to see it fail**
 
 Run: `cd apps/desktop && npx vitest run src/test/Users.test.tsx`
-Expected: FAIL, `Unable to find role="table"` (there is no `/settings` route yet, so it lands on Documents).
+Expected: FAIL, `Unable to find role="table" and name "People who sign in"` (there is no `/settings` route yet, so it lands on Documents).
 
 **Step 3: Write the implementation**
 
@@ -6914,20 +7117,22 @@ export function SettingsLayout() {
 
 `apps/desktop/src/pages/Users.tsx`:
 ```tsx
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { Link } from "react-router-dom";
 import { KeyRound, UserPlus } from "lucide-react";
-import { api, ApiError, messageOf } from "../api/client";
+import { api, fieldErrorsOf, messageOf } from "../api/client";
 import type { Role, User } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/Card";
-import { Select, SelectField, TextField } from "../ui/Field";
+import { Select, SelectField, TextField, useFocusFirstInvalid } from "../ui/Field";
 import { ROLE_NAMES } from "../ui/Layout";
-import { Notice } from "../ui/Notice";
+import { LiveNotices, Notice } from "../ui/Notice";
 
 const ROLES: Role[] = ["admin", "editor", "reviewer"];
 const EMPTY = { display_name: "", username: "", role: "editor" as Role, password: "" };
+const FIELDS = ["display_name", "username", "role", "password"] as const;
 
 function asA(role: Role): string {
   return role === "admin" ? "an admin" : `a ${role}`;
@@ -6943,20 +7148,158 @@ function State({ user }: { user: User }) {
   return <Badge tone="green">Active</Badge>;
 }
 
+/** The role, shown as `shown` while a change saves. Giving up admin yourself
+ * asks first, with its answer focused; Escape or Keep admin puts focus back on
+ * the role. The select is never disabled while it saves, so focus stays put;
+ * a pick made then is ignored. */
+function RoleControl({ user, shown, busy, self, onPick }: {
+  user: User;
+  shown: Role;
+  busy: boolean;
+  self: boolean;
+  onPick: (role: Role) => void;
+}) {
+  const [asking, setAsking] = useState<Role | null>(null);
+  const select = useRef<HTMLSelectElement>(null);
+  const returning = useRef(false);
+
+  useEffect(() => {
+    if (!asking && returning.current) {
+      returning.current = false;
+      select.current?.focus();
+    }
+  }, [asking]);
+
+  function close() {
+    returning.current = true;
+    setAsking(null);
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="w-36">
+        <Select
+          ref={select}
+          aria-label={`Role for ${user.display_name}`}
+          value={shown}
+          disabled={!user.active}
+          onChange={(e) => {
+            if (busy || asking) return;
+            const role = e.target.value as Role;
+            if (self && user.role === "admin" && role !== "admin") setAsking(role);
+            else onPick(role);
+          }}
+        >
+          {ROLES.map((r) => <option key={r} value={r}>{ROLE_NAMES[r]}</option>)}
+        </Select>
+      </div>
+      {asking && (
+        <div role="group" aria-label="You'll lose Settings. Change your role?" className="flex flex-wrap items-center gap-2"
+             onKeyDown={(e: KeyboardEvent) => { if (e.key === "Escape") close(); }}>
+          <span className="text-body-sm text-space-lightGray">You'll lose Settings. Change your role?</span>
+          <Button variant="destructive" size="sm" autoFocus onClick={() => { const role = asking; close(); onPick(role); }}>
+            Yes, change my role
+          </Button>
+          <Button variant="ghost" size="sm" onClick={close}>Keep admin</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Deactivate asks first, in the row, with its answer focused; Escape or
+ * Keep puts focus back on Deactivate. Reactivating needs no question. */
+function ActiveControl({ user, onChange }: { user: User; onChange: (active: boolean) => void }) {
+  const [asking, setAsking] = useState(false);
+  const back = useRef<HTMLButtonElement>(null);
+  const returning = useRef(false);
+
+  useEffect(() => {
+    if (!asking && returning.current) {
+      returning.current = false;
+      back.current?.focus();
+    }
+  }, [asking]);
+
+  function close() {
+    returning.current = true;
+    setAsking(false);
+  }
+
+  if (!user.active) {
+    return (
+      <Button ref={back} data-active-for={user.id} variant="ghost" size="sm" onClick={() => onChange(true)}>
+        Reactivate<span className="sr-only"> {user.display_name}</span>
+      </Button>
+    );
+  }
+  if (asking) {
+    return (
+      <div role="group" aria-label={`Deactivate ${user.display_name}?`} className="flex items-center gap-2"
+           onKeyDown={(e: KeyboardEvent) => { if (e.key === "Escape") close(); }}>
+        <span className="text-body-sm text-space-lightGray">Deactivate and sign out?</span>
+        <Button variant="destructive" size="sm" autoFocus onClick={() => { close(); onChange(false); }}>
+          Yes, deactivate<span className="sr-only"> {user.display_name}</span>
+        </Button>
+        <Button variant="ghost" size="sm" onClick={close}>
+          Keep<span className="sr-only"> {user.display_name}</span>
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <Button ref={back} data-active-for={user.id} variant="ghost" size="sm" onClick={() => setAsking(true)}>
+      Deactivate<span className="sr-only"> {user.display_name}</span>
+    </Button>
+  );
+}
+
 export function Users() {
-  const { me } = useAuth();
+  const { me, refreshMe } = useAuth();
   const [users, setUsers] = useState<User[] | null>(null);
+  const [loadTrouble, setLoadTrouble] = useState<string | null>(null);
   const [form, setForm] = useState(EMPTY);
   const [fields, setFields] = useState<Record<string, string>>({});
   const [passwordFor, setPasswordFor] = useState<User | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  // the row whose change is saving, and the role it shows meanwhile
+  const [pending, setPending] = useState<{ id: string; role: Role } | null>(null);
+  const [adding, setAdding] = useState(false);
+  // the same two, read at once: a second click lands before React renders again
+  const changing = useRef(false);
+  const addingNow = useRef(false);
+  const haveUsers = useRef(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  const tableRef = useRef<HTMLTableElement>(null);
+  // the Set password button that opened the form, given focus back when it closes
+  const opener = useRef<HTMLButtonElement | null>(null);
+  // the row whose Deactivate or Reactivate takes focus once the list is back
+  const refocus = useRef<string | null>(null);
+  useFocusFirstInvalid(formRef, fields);
+
+  useEffect(() => {
+    if (!passwordFor && opener.current) {
+      opener.current.focus();
+      opener.current = null;
+    }
+  }, [passwordFor]);
+
+  useEffect(() => {
+    if (!refocus.current) return;
+    tableRef.current?.querySelector<HTMLElement>(`[data-active-for="${refocus.current}"]`)?.focus();
+    refocus.current = null;
+  }, [users]);
 
   const load = useCallback(async () => {
     try {
       setUsers((await api.get<{ items: User[] }>("/v1/users")).items);
+      haveUsers.current = true;
+      setLoadTrouble(null);
     } catch (e) {
-      setProblem(messageOf(e));
+      // the first time, in place of the list; after that, above it
+      if (haveUsers.current) setProblem(messageOf(e));
+      else setLoadTrouble(messageOf(e));
     }
   }, []);
 
@@ -6964,24 +7307,52 @@ export function Users() {
     void load();
   }, [load]);
 
+  function retry() {
+    setLoadTrouble(null);
+    void load();
+  }
+
   function say(message: string | null, trouble: string | null = null) {
     setDone(message);
     setProblem(trouble);
   }
 
   async function change(user: User, patch: { role?: Role; active?: boolean }, said: string) {
+    if (changing.current) return;
+    changing.current = true;
+    setPending({ id: user.id, role: patch.role ?? user.role });
     say(null);
+    const self = user.id === me?.id;
+    let changed = false;
     try {
       await api.patch(`/v1/users/${user.id}`, patch);
+      changed = true;
       say(said);
     } catch (e) {
       say(null, messageOf(e));
     }
-    await load();
+    try {
+      // your own role: who you are is asked again, and without Settings
+      // RequireScope takes you home; the list isn't needed
+      if (changed && self) await refreshMe();
+      else {
+        if (patch.active !== undefined) refocus.current = user.id;
+        await load();
+      }
+    } catch (e) {
+      say(null, messageOf(e));
+      await load();
+    } finally {
+      changing.current = false;
+      setPending(null);
+    }
   }
 
   async function add(e: FormEvent) {
     e.preventDefault();
+    if (addingNow.current) return;
+    addingNow.current = true;
+    setAdding(true);
     setFields({});
     say(null);
     try {
@@ -6990,15 +7361,18 @@ export function Users() {
       setForm(EMPTY);
       await load();
     } catch (err) {
-      if (err instanceof ApiError && Object.keys(err.fields).length > 0) setFields(err.fields);
+      const wrong = fieldErrorsOf(err, FIELDS);
+      if (Object.keys(wrong).length > 0) setFields(wrong);
       else say(null, messageOf(err));
+    } finally {
+      addingNow.current = false;
+      setAdding(false);
     }
   }
 
   return (
     <div className="flex flex-col gap-8">
-      {problem && <Notice>{problem}</Notice>}
-      {done && <Notice tone="success">{done}</Notice>}
+      <LiveNotices said={done} problem={problem} />
 
       <Card>
         <CardHeader>
@@ -7009,9 +7383,17 @@ export function Users() {
         </CardHeader>
         <CardContent className="overflow-x-auto">
           {users === null ? (
-            <p className="text-body-sm text-space-gray">Loading…</p>
+            loadTrouble ? (
+              <div className="flex flex-col items-start gap-4">
+                <Notice>Couldn't load the people who sign in. {loadTrouble}</Notice>
+                <Button variant="outline" onClick={retry}>Try again</Button>
+              </div>
+            ) : (
+              <p role="status" className="text-body-sm text-space-gray">Loading…</p>
+            )
           ) : (
-            <table className="w-full text-left text-body-sm">
+            <table ref={tableRef} className="w-full text-left text-body-sm">
+              <caption className="sr-only">People who sign in</caption>
               <thead className="text-caption text-space-gray">
                 <tr>
                   <th scope="col" className="py-2 pr-4 font-medium">Name</th>
@@ -7023,48 +7405,50 @@ export function Users() {
                 </tr>
               </thead>
               <tbody>
-                {users.map((u) => (
-                  <tr key={u.id} className="border-t border-space-blue/10">
-                    <th scope="row" className="py-3 pr-4 font-medium text-space-lightGray">{u.display_name}</th>
-                    <td className="py-3 pr-4 text-space-gray">{u.username}</td>
-                    <td className="py-3 pr-4">
-                      <div className="w-36">
-                        <Select
-                          aria-label={`Role for ${u.display_name}`}
-                          value={u.role}
-                          disabled={!u.active}
-                          onChange={(e) => {
-                            const role = e.target.value as Role;
-                            void change(u, { role }, `${u.display_name} is ${asA(role)} now.`);
-                          }}
-                        >
-                          {ROLES.map((r) => <option key={r} value={r}>{ROLE_NAMES[r]}</option>)}
-                        </Select>
-                      </div>
-                    </td>
-                    <td className="py-3 pr-4"><State user={u} /></td>
-                    <td className="py-3 pr-4 text-space-gray">{when(u.last_sign_in_at)}</td>
-                    <td className="py-3">
-                      <div className="flex justify-end gap-2">
-                        <Button variant="ghost" size="sm" onClick={() => setPasswordFor(u)}>
-                          <KeyRound aria-hidden="true" />
-                          Set password<span className="sr-only"> for {u.display_name}</span>
-                        </Button>
-                        {u.id !== me?.id && (u.active ? (
-                          <Button variant="ghost" size="sm"
-                                  onClick={() => void change(u, { active: false }, `${u.display_name} is deactivated and signed out.`)}>
-                            Deactivate<span className="sr-only"> {u.display_name}</span>
-                          </Button>
-                        ) : (
-                          <Button variant="ghost" size="sm"
-                                  onClick={() => void change(u, { active: true }, `${u.display_name} can sign in again.`)}>
-                            Reactivate<span className="sr-only"> {u.display_name}</span>
-                          </Button>
-                        ))}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {users.map((u) => {
+                  const self = u.id === me?.id;
+                  const saving = pending?.id === u.id;
+                  return (
+                    <tr key={u.id} aria-busy={saving || undefined} className="border-t border-space-blue/10">
+                      <th scope="row" className="py-3 pr-4 font-medium text-space-lightGray">{u.display_name}</th>
+                      <td className="py-3 pr-4 text-space-gray">{u.username}</td>
+                      <td className="py-3 pr-4">
+                        <RoleControl
+                          user={u}
+                          self={self}
+                          shown={pending && saving ? pending.role : u.role}
+                          busy={pending !== null}
+                          onPick={(role) => void change(u, { role }, `${u.display_name} is ${asA(role)} now.`)}
+                        />
+                      </td>
+                      <td className="py-3 pr-4"><State user={u} /></td>
+                      <td className="py-3 pr-4 text-space-gray">{when(u.last_sign_in_at)}</td>
+                      <td className="py-3">
+                        <div className="flex items-center justify-end gap-2">
+                          {self ? (
+                            <Link to="/account" className="rounded-sm text-body-sm text-space-blue underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
+                              <span className="sr-only">Your password: </span>Change it on your account page
+                            </Link>
+                          ) : (
+                            <>
+                              <Button variant="ghost" size="sm"
+                                      onClick={(e) => { opener.current = e.currentTarget; setPasswordFor(u); }}>
+                                <KeyRound aria-hidden="true" />
+                                Set password<span className="sr-only"> for {u.display_name}</span>
+                              </Button>
+                              <ActiveControl
+                                user={u}
+                                onChange={(active) => void change(u, { active }, active
+                                  ? `${u.display_name} can sign in again.`
+                                  : `${u.display_name} is deactivated and signed out.`)}
+                              />
+                            </>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}
@@ -7076,6 +7460,7 @@ export function Users() {
           key={passwordFor.id}
           user={passwordFor}
           onCancel={() => setPasswordFor(null)}
+          onStart={() => say(null)}
           onDone={(said) => {
             setPasswordFor(null);
             say(said);
@@ -7092,7 +7477,7 @@ export function Users() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <form onSubmit={add} noValidate aria-label="Add someone" className="grid max-w-panel gap-4 md:grid-cols-2">
+          <form ref={formRef} onSubmit={add} noValidate aria-label="Add someone" className="grid max-w-panel gap-4 md:grid-cols-2">
             <TextField label="Name" autoComplete="off" value={form.display_name}
                        onChange={(e) => setForm({ ...form, display_name: e.target.value })} error={fields.display_name} />
             <TextField label="Username" autoComplete="off" autoCapitalize="none" spellCheck={false} value={form.username}
@@ -7104,7 +7489,7 @@ export function Users() {
             <TextField label="Password" type="password" autoComplete="new-password" hint="At least 12 characters. Tell them yourself."
                        value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} error={fields.password} />
             <div className="md:col-span-2">
-              <Button type="submit"><UserPlus aria-hidden="true" />Add</Button>
+              <Button type="submit" disabled={adding}><UserPlus aria-hidden="true" />{adding ? "Adding…" : "Add"}</Button>
             </div>
           </form>
         </CardContent>
@@ -7113,18 +7498,38 @@ export function Users() {
   );
 }
 
-function SetPassword({ user, onDone, onCancel }: { user: User; onDone: (said: string) => void; onCancel: () => void }) {
+function SetPassword({ user, onStart, onDone, onCancel }: {
+  user: User;
+  onStart: () => void;
+  onDone: (said: string) => void;
+  onCancel: () => void;
+}) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | undefined>();
+  const [problem, setProblem] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const saving = useRef(false);
   const title = `New password for ${user.display_name}`;
 
   async function save(e: FormEvent) {
     e.preventDefault();
+    if (saving.current) return;
+    saving.current = true;
+    setBusy(true);
+    setError(undefined);
+    setProblem(null);
+    onStart();
     try {
       await api.post(`/v1/users/${user.id}/password`, { password });
       onDone(`${user.display_name}'s password is set. They're signed out everywhere until they use it.`);
     } catch (err) {
-      setError(err instanceof ApiError ? err.fields.password ?? err.message : messageOf(err));
+      // what is wrong with the password goes beside it; anything else above
+      const wrong = fieldErrorsOf(err, ["password"]).password;
+      if (wrong) setError(wrong);
+      else setProblem(messageOf(err));
+    } finally {
+      saving.current = false;
+      setBusy(false);
     }
   }
 
@@ -7135,12 +7540,16 @@ function SetPassword({ user, onDone, onCancel }: { user: User; onDone: (said: st
         <CardDescription>It also clears a lock after too many wrong passwords.</CardDescription>
       </CardHeader>
       <CardContent>
-        <form onSubmit={save} noValidate aria-label={title} className="flex flex-wrap items-start gap-3">
-          <TextField label="New password" type="password" autoComplete="new-password" hint="At least 12 characters."
-                     value={password} onChange={(e) => setPassword(e.target.value)} error={error} className="min-w-64 flex-1" />
-          <div className="flex gap-2 pt-7">
-            <Button type="submit">Save password</Button>
-            <Button variant="ghost" onClick={onCancel}>Cancel</Button>
+        <form onSubmit={save} noValidate aria-label={title} className="flex flex-col gap-4"
+              onKeyDown={(e: KeyboardEvent) => { if (e.key === "Escape") onCancel(); }}>
+          {problem && <Notice>{problem}</Notice>}
+          <div className="flex flex-wrap items-start gap-3">
+            <TextField label="New password" type="password" autoComplete="new-password" hint="At least 12 characters." autoFocus
+                       value={password} onChange={(e) => setPassword(e.target.value)} error={error} className="min-w-64 flex-1" />
+            <div className="flex gap-2 pt-7">
+              <Button type="submit" disabled={busy}>{busy ? "Saving…" : "Save password"}</Button>
+              <Button variant="ghost" onClick={onCancel}>Cancel</Button>
+            </div>
           </div>
         </form>
       </CardContent>
@@ -7167,7 +7576,7 @@ and add inside the `Layout` route, after the Spend route:
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `69 passed`.
+Expected: `78 passed`.
 
 **Step 5: Commit**
 
@@ -7196,7 +7605,7 @@ git commit -m "Look after users on the desktop: add, change role, set a password
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Org } from "../api/types";
-import { ACME, ADA, apiError, FRESH, json, renderApp, stubApi, type Handler } from "./harness";
+import { ACME, ADA, apiError, FRESH, json, renderApp, said, stubApi, type Handler } from "./harness";
 
 const ORG: Org = {
   name: "Acme Pty Ltd", abn: "51 824 753 556", phone: null, email: "office@acme.com.au",
@@ -7229,7 +7638,7 @@ describe("Settings → Organisation", () => {
     renderApp("/settings/org");
     await userEvent.type(await screen.findByLabelText("Phone"), "03 9000 0000");
     await userEvent.click(screen.getByRole("button", { name: "Save details" }));
-    expect(await screen.findByRole("status")).toHaveTextContent("Saved.");
+    await said("Saved.");
     expect(calls.find((c) => c.method === "PUT")?.body).toMatchObject({ name: "Acme Pty Ltd", phone: "03 9000 0000" });
     expect(calls.filter((c) => c.url === "/api/v1/branding")).toHaveLength(2);
   });
@@ -7242,6 +7651,7 @@ describe("Settings → Organisation", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Save details" }));
     expect(await screen.findByText("That isn't a valid ABN. Check the 11 digits.")).toBeInTheDocument();
     expect(screen.getByLabelText("ABN")).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText("ABN")).toHaveFocus();
   });
 
   it("uploads a logo as it is", async () => {
@@ -7250,10 +7660,44 @@ describe("Settings → Organisation", () => {
     renderApp("/settings/org");
     const logo = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "logo.png", { type: "image/png" });
     await userEvent.upload(await screen.findByLabelText("Upload logo"), logo);
-    expect(await screen.findByRole("status")).toHaveTextContent("Logo updated.");
+    await said("Logo updated.");
     const sent = calls.find((c) => c.url === "/api/v1/settings/org/logo");
     expect(sent?.body).toBe(logo);
     expect(sent?.headers.get("Content-Type")).toBe("image/png");
+  });
+
+  it("takes one logo at a time", async () => {
+    let letGo: (r: Response) => void = () => {};
+    const { calls } = orgApi((method, url) => method === "PUT" && url === "/api/v1/settings/org/logo"
+      ? new Promise<Response>((resolve) => { letGo = resolve; }) : null);
+    renderApp("/settings/org");
+    const picker = await screen.findByLabelText("Upload logo");
+    const logo = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "logo.png", { type: "image/png" });
+    await userEvent.upload(picker, logo);
+    const busy = screen.getByLabelText("Uploading…");
+    expect(busy).toHaveAttribute("aria-disabled", "true");
+    expect(busy).toBeEnabled();
+    await userEvent.upload(busy, logo);
+    letGo(new Response(null, { status: 204 }));
+    await said("Logo updated.");
+    expect(calls.filter((c) => c.url === "/api/v1/settings/org/logo")).toHaveLength(1);
+    expect(screen.getByLabelText("Upload logo")).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("says when the details can't be loaded, and tries again", async () => {
+    let failed = false;
+    orgApi((method, url) => {
+      if (method === "GET" && url === "/api/v1/settings/org" && !failed) {
+        failed = true;
+        return apiError(500, "internal", "Something broke on our side.");
+      }
+      return null;
+    });
+    renderApp("/settings/org");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load your organisation's details.");
+    expect(screen.queryByText("Loading…")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByLabelText("Name")).toHaveValue("Acme Pty Ltd");
   });
 
   it("refuses a logo over 512 KB before sending it", async () => {
@@ -7266,11 +7710,20 @@ describe("Settings → Organisation", () => {
   });
 
   it("removes the logo", async () => {
-    const { calls } = orgApi((method, url) => method === "DELETE" && url === "/api/v1/settings/org/logo"
-      ? new Response(null, { status: 204 }) : null, { ...ACME, logo_id: "logo-1" });
+    let removed = false;
+    const { calls } = orgApi((method, url) => {
+      if (method === "DELETE" && url === "/api/v1/settings/org/logo") {
+        removed = true;
+        return new Response(null, { status: 204 });
+      }
+      if (removed && url === "/api/v1/branding") return json(200, ACME);
+      return null;
+    }, { ...ACME, logo_id: "logo-1" });
     renderApp("/settings/org");
     await userEvent.click(await screen.findByRole("button", { name: "Remove logo" }));
-    expect(await screen.findByRole("status")).toHaveTextContent("Logo removed.");
+    await said("Logo removed.");
+    // the Remove button has gone, so focus goes to the way to add one again
+    expect(screen.getByLabelText("Upload logo")).toHaveFocus();
     expect(calls.some((c) => c.method === "DELETE")).toBe(true);
   });
 
@@ -7301,15 +7754,15 @@ Expected: FAIL, `Unable to find a label with the text of: Name` (no `/settings/o
 
 `apps/desktop/src/pages/OrgSettings.tsx`:
 ```tsx
-import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { Upload } from "lucide-react";
-import { api, ApiError, messageOf } from "../api/client";
+import { api, fieldErrorsOf, messageOf } from "../api/client";
 import type { Org } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { Button } from "../ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/Card";
-import { TextAreaField, TextField } from "../ui/Field";
-import { Notice } from "../ui/Notice";
+import { TextAreaField, TextField, useFocusFirstInvalid } from "../ui/Field";
+import { LiveNotices, Notice } from "../ui/Notice";
 import { OrgMark } from "../ui/OrgMark";
 
 interface OrgForm {
@@ -7320,6 +7773,7 @@ interface OrgForm {
   address: string;
 }
 
+const FIELDS = ["name", "abn", "phone", "email", "address"] as const;
 const MAX_LOGO = 512 * 1024;
 const KINDS = ["image/png", "image/jpeg"];
 
@@ -7327,30 +7781,47 @@ function toForm(o: Org): OrgForm {
   return { name: o.name ?? "", abn: o.abn ?? "", phone: o.phone ?? "", email: o.email ?? "", address: o.address ?? "" };
 }
 
-// the outline Button's look, on the label that opens the file picker
+// the outline Button's look, on the label that opens the file picker; the
+// ring shows when the hidden input has keyboard focus, as a button's would
 const PICK =
   "inline-flex h-10 cursor-pointer items-center gap-2 rounded-md border border-space-blue/30 px-4 text-label " +
   "text-space-lightGray hover:border-space-blue/50 hover:bg-space-blue/10 " +
-  "focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring [&_svg]:size-4";
+  "has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-ring " +
+  "has-[[aria-disabled=true]]:cursor-not-allowed has-[[aria-disabled=true]]:opacity-50 [&_svg]:size-4";
+
+type LogoWork = "uploading" | "removing" | null;
 
 export function OrgSettings() {
   const { branding, reloadBranding } = useAuth();
   const [form, setForm] = useState<OrgForm | null>(null);
+  const [loadTrouble, setLoadTrouble] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   const [fields, setFields] = useState<Record<string, string>>({});
   const [done, setDone] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [logoWork, setLogoWork] = useState<LogoWork>(null);
+  // read at once: a second pick can land before React renders again
+  const logoBusy = useRef(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  const picker = useRef<HTMLInputElement>(null);
+  useFocusFirstInvalid(formRef, fields);
 
   useEffect(() => {
     let live = true;
     api.get<Org>("/v1/settings/org").then(
       (o) => { if (live) setForm(toForm(o)); },
-      (e) => { if (live) setProblem(messageOf(e)); },
+      (e) => { if (live) setLoadTrouble(messageOf(e)); },
     );
     return () => {
       live = false;
     };
-  }, []);
+  }, [attempt]);
+
+  function retry() {
+    setLoadTrouble(null);
+    setAttempt((n) => n + 1);
+  }
 
   function say(message: string | null, trouble: string | null = null) {
     setDone(message);
@@ -7359,7 +7830,7 @@ export function OrgSettings() {
 
   async function save(e: FormEvent) {
     e.preventDefault();
-    if (!form) return;
+    if (!form || busy) return;
     setBusy(true);
     setFields({});
     say(null);
@@ -7368,39 +7839,53 @@ export function OrgSettings() {
       await reloadBranding();
       say("Saved. Documents use these details from now on.");
     } catch (err) {
-      if (err instanceof ApiError && Object.keys(err.fields).length > 0) setFields(err.fields);
+      const wrong = fieldErrorsOf(err, FIELDS);
+      if (Object.keys(wrong).length > 0) setFields(wrong);
       else say(null, messageOf(err));
     } finally {
       setBusy(false);
     }
   }
 
-  async function upload(e: ChangeEvent<HTMLInputElement>) {
+  /** One change to the logo at a time; the picker and Remove stay focusable. */
+  async function logo(work: Exclude<LogoWork, null>, run: () => Promise<string>) {
+    logoBusy.current = true;
+    setLogoWork(work);
+    say(null);
+    try {
+      const said = await run();
+      await reloadBranding();
+      say(said);
+    } catch (err) {
+      say(null, messageOf(err));
+    } finally {
+      logoBusy.current = false;
+      setLogoWork(null);
+    }
+  }
+
+  function upload(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = "";
-    if (!file) return;
+    if (!file || logoBusy.current) return;
     say(null);
     // the API checks both too; this saves sending a file it would refuse
     if (!KINDS.includes(file.type)) return say(null, "Use a PNG or JPEG for the logo.");
     if (file.size > MAX_LOGO) return say(null, "The logo can be 512 KB at most.");
-    try {
+    void logo("uploading", async () => {
       await api.put("/v1/settings/org/logo", file);
-      await reloadBranding();
-      say("Logo updated.");
-    } catch (err) {
-      say(null, messageOf(err));
-    }
+      return "Logo updated.";
+    });
   }
 
-  async function removeLogo() {
-    say(null);
-    try {
+  function removeLogo() {
+    if (logoBusy.current) return;
+    void logo("removing", async () => {
       await api.delete("/v1/settings/org/logo");
-      await reloadBranding();
-      say("Logo removed. Simple Docs shows its own mark instead.");
-    } catch (err) {
-      say(null, messageOf(err));
-    }
+      // the Remove button is going; the way to add one again takes focus
+      picker.current?.focus();
+      return "Logo removed. Simple Docs shows its own mark instead.";
+    });
   }
 
   const edit = (key: keyof OrgForm) => (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
@@ -7408,8 +7893,7 @@ export function OrgSettings() {
 
   return (
     <div className="flex flex-col gap-8">
-      {problem && <Notice>{problem}</Notice>}
-      {done && <Notice tone="success">{done}</Notice>}
+      <LiveNotices said={done} problem={problem} />
 
       <Card>
         <CardHeader>
@@ -7423,10 +7907,18 @@ export function OrgSettings() {
           <OrgMark logoId={branding?.logo_id ?? null} size={64} />
           <label className={PICK}>
             <Upload aria-hidden="true" />
-            {branding?.logo_id ? "Replace logo" : "Upload logo"}
-            <input type="file" accept="image/png,image/jpeg" className="sr-only" onChange={(e) => void upload(e)} />
+            {logoWork === "uploading" ? "Uploading…" : branding?.logo_id ? "Replace logo" : "Upload logo"}
+            <input ref={picker} type="file" accept="image/png,image/jpeg" className="sr-only"
+                   aria-disabled={logoWork ? true : undefined}
+                   onClick={(e) => { if (logoBusy.current) e.preventDefault(); }}
+                   onChange={upload} />
           </label>
-          {branding?.logo_id && <Button variant="ghost" onClick={() => void removeLogo()}>Remove logo</Button>}
+          {branding?.logo_id && (
+            <Button variant="ghost" aria-disabled={logoWork ? true : undefined}
+                    className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50" onClick={removeLogo}>
+              {logoWork === "removing" ? "Removing…" : "Remove logo"}
+            </Button>
+          )}
         </CardContent>
       </Card>
 
@@ -7437,9 +7929,16 @@ export function OrgSettings() {
         </CardHeader>
         <CardContent>
           {form === null ? (
-            <p className="text-body-sm text-space-gray">Loading…</p>
+            loadTrouble ? (
+              <div className="flex flex-col items-start gap-4">
+                <Notice>Couldn't load your organisation's details. {loadTrouble}</Notice>
+                <Button variant="outline" onClick={retry}>Try again</Button>
+              </div>
+            ) : (
+              <p role="status" className="text-body-sm text-space-gray">Loading…</p>
+            )
           ) : (
-            <form onSubmit={save} noValidate aria-label="Organisation details" className="grid max-w-panel gap-4 md:grid-cols-2">
+            <form ref={formRef} onSubmit={save} noValidate aria-label="Organisation details" className="grid max-w-panel gap-4 md:grid-cols-2">
               <TextField label="Name" className="md:col-span-2" autoComplete="organization" value={form.name}
                          onChange={edit("name")} error={fields.name} required />
               <TextField label="ABN" inputMode="numeric" hint="11 digits, e.g. 51 824 753 556." value={form.abn}
@@ -7481,7 +7980,7 @@ import { OrgSettings } from "./pages/OrgSettings";
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test`
-Expected: `76 passed`.
+Expected: `87 passed`.
 
 **Step 5: Commit**
 
@@ -7508,7 +8007,7 @@ git commit -m "Set the organisation's details and logo on the desktop, where fir
 ```tsx
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { apiError, json, MEL, renderApp, stubApi } from "./harness";
+import { apiError, json, MEL, renderApp, said, stubApi } from "./harness";
 
 async function change(current: string, next: string, again = next) {
   const form = await screen.findByRole("form", { name: "Change your password" });
@@ -7545,7 +8044,7 @@ describe("your account", () => {
       ? new Response(null, { status: 204 }) : null, { me: MEL });
     renderApp("/account");
     const form = await change("correct horse battery", "a brand new password");
-    expect(await screen.findByRole("status")).toHaveTextContent("Password changed.");
+    await said("Password changed.");
     expect(calls.find((c) => c.url === "/api/v1/auth/password")?.body).toEqual({
       current_password: "correct horse battery", new_password: "a brand new password" });
     expect(within(form).getByLabelText("Current password")).toHaveValue("");
@@ -7632,7 +8131,7 @@ import { Button } from "../ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/Card";
 import { TextField, useFocusFirstInvalid } from "../ui/Field";
 import { ROLE_NAMES } from "../ui/Layout";
-import { Notice } from "../ui/Notice";
+import { LiveNotices } from "../ui/Notice";
 import { SectionHeading } from "../ui/SectionHeading";
 
 const BLANK = { current_password: "", new_password: "", again: "" };
@@ -7681,8 +8180,7 @@ export function Account() {
       <SectionHeading accentText="Your" description={me ? `Signed in as ${me.username}, ${article} ${role}.` : undefined}>
         account
       </SectionHeading>
-      {problem && <Notice>{problem}</Notice>}
-      {done && <Notice tone="success">{done}</Notice>}
+      <LiveNotices said={done} problem={problem} />
       <Card className="max-w-panel">
         <CardHeader>
           <CardTitle>Change your password</CardTitle>
@@ -7723,7 +8221,7 @@ import { Account } from "./pages/Account";
 **Step 4: Run it to see it pass**
 
 Run: `cd apps/desktop && npm test && npm run lint && npm run build`
-Expected: `85 passed`, no lint problems, and a build.
+Expected: `96 passed`, no lint problems, and a build.
 
 **Step 5: Commit**
 
@@ -8214,7 +8712,7 @@ Expected: `93 passed`, `All checks passed!`, `Success: no issues found`.
 **Step 2: The desktop**
 
 Run: `cd apps/desktop && npm test && npm run lint && npm run build`
-Expected: `85 passed`, no lint problems, a build in `dist/`.
+Expected: `96 passed`, no lint problems, a build in `dist/`.
 
 **Step 3: From nothing**
 

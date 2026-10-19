@@ -1,7 +1,7 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Org } from "../api/types";
-import { ACME, ADA, apiError, FRESH, json, renderApp, stubApi, type Handler } from "./harness";
+import { ACME, ADA, apiError, FRESH, json, renderApp, said, stubApi, type Handler } from "./harness";
 
 const ORG: Org = {
   name: "Acme Pty Ltd", abn: "51 824 753 556", phone: null, email: "office@acme.com.au",
@@ -34,7 +34,7 @@ describe("Settings → Organisation", () => {
     renderApp("/settings/org");
     await userEvent.type(await screen.findByLabelText("Phone"), "03 9000 0000");
     await userEvent.click(screen.getByRole("button", { name: "Save details" }));
-    expect(await screen.findByRole("status")).toHaveTextContent("Saved.");
+    await said("Saved.");
     expect(calls.find((c) => c.method === "PUT")?.body).toMatchObject({ name: "Acme Pty Ltd", phone: "03 9000 0000" });
     expect(calls.filter((c) => c.url === "/api/v1/branding")).toHaveLength(2);
   });
@@ -56,10 +56,44 @@ describe("Settings → Organisation", () => {
     renderApp("/settings/org");
     const logo = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "logo.png", { type: "image/png" });
     await userEvent.upload(await screen.findByLabelText("Upload logo"), logo);
-    expect(await screen.findByRole("status")).toHaveTextContent("Logo updated.");
+    await said("Logo updated.");
     const sent = calls.find((c) => c.url === "/api/v1/settings/org/logo");
     expect(sent?.body).toBe(logo);
     expect(sent?.headers.get("Content-Type")).toBe("image/png");
+  });
+
+  it("takes one logo at a time", async () => {
+    let letGo: (r: Response) => void = () => {};
+    const { calls } = orgApi((method, url) => method === "PUT" && url === "/api/v1/settings/org/logo"
+      ? new Promise<Response>((resolve) => { letGo = resolve; }) : null);
+    renderApp("/settings/org");
+    const picker = await screen.findByLabelText("Upload logo");
+    const logo = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "logo.png", { type: "image/png" });
+    await userEvent.upload(picker, logo);
+    const busy = screen.getByLabelText("Uploading…");
+    expect(busy).toHaveAttribute("aria-disabled", "true");
+    expect(busy).toBeEnabled();
+    await userEvent.upload(busy, logo);
+    letGo(new Response(null, { status: 204 }));
+    await said("Logo updated.");
+    expect(calls.filter((c) => c.url === "/api/v1/settings/org/logo")).toHaveLength(1);
+    expect(screen.getByLabelText("Upload logo")).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("says when the details can't be loaded, and tries again", async () => {
+    let failed = false;
+    orgApi((method, url) => {
+      if (method === "GET" && url === "/api/v1/settings/org" && !failed) {
+        failed = true;
+        return apiError(500, "internal", "Something broke on our side.");
+      }
+      return null;
+    });
+    renderApp("/settings/org");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load your organisation's details.");
+    expect(screen.queryByText("Loading…")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByLabelText("Name")).toHaveValue("Acme Pty Ltd");
   });
 
   it("refuses a logo over 512 KB before sending it", async () => {
@@ -83,7 +117,7 @@ describe("Settings → Organisation", () => {
     }, { ...ACME, logo_id: "logo-1" });
     renderApp("/settings/org");
     await userEvent.click(await screen.findByRole("button", { name: "Remove logo" }));
-    expect(await screen.findByRole("status")).toHaveTextContent("Logo removed.");
+    await said("Logo removed.");
     // the Remove button has gone, so focus goes to the way to add one again
     expect(screen.getByLabelText("Upload logo")).toHaveFocus();
     expect(calls.some((c) => c.method === "DELETE")).toBe(true);

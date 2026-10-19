@@ -7,7 +7,7 @@ import { AuthFrame } from "../ui/AuthFrame";
 import { Button } from "../ui/Button";
 import { Card, CardContent, CardHeader } from "../ui/Card";
 import { TextField, useFocusFirstInvalid } from "../ui/Field";
-import { Notice } from "../ui/Notice";
+import { LiveNotices } from "../ui/Notice";
 import { SectionHeading } from "../ui/SectionHeading";
 import { SimpleDocsMark } from "../ui/SimpleDocsMark";
 
@@ -71,7 +71,7 @@ export function SetUp() {
         </CardHeader>
         <CardContent>
           <form ref={formRef} onSubmit={submit} noValidate className="flex flex-col gap-4">
-            {problem && <Notice>{problem}</Notice>}
+            <LiveNotices said={null} problem={problem} />
             <TextField label="Organisation" hint="As your documents should name it." autoComplete="organization"
                        value={form.org_name} onChange={set("org_name")} error={fields.org_name} required />
             <TextField label="Your name" autoComplete="name" value={form.display_name}

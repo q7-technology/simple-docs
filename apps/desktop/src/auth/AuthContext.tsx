@@ -18,6 +18,8 @@ interface AuthState {
   trouble: string | null;
   retry: () => void;
   reloadBranding: () => Promise<void>;
+  /** Asks again who is signed in, after your own role changes; signed out is null. */
+  refreshMe: () => Promise<void>;
   signIn: (username: string, password: string) => Promise<void>;
   setUp: (form: SetUpForm) => Promise<void>;
   /** Throws, still signed in, only when Simple Docs can't be reached. */
@@ -80,6 +82,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setBranding(await api.get<Branding>("/v1/branding"));
   }, []);
 
+  const refreshMe = useCallback(async () => {
+    try {
+      setMe(await api.get<Me>("/v1/auth/me"));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) setMe(null);
+      else throw e;
+    }
+  }, []);
+
   const signIn = useCallback(async (username: string, password: string) => {
     setMe(await api.post<Me>("/v1/auth/sign-in", { username, password }));
     setTrouble(null);
@@ -112,8 +123,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [me]);
 
   const value = useMemo(
-    () => ({ ready, branding, me, trouble, retry, reloadBranding, signIn, setUp, signOut, can }),
-    [ready, branding, me, trouble, retry, reloadBranding, signIn, setUp, signOut, can],
+    () => ({ ready, branding, me, trouble, retry, reloadBranding, refreshMe, signIn, setUp, signOut, can }),
+    [ready, branding, me, trouble, retry, reloadBranding, refreshMe, signIn, setUp, signOut, can],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

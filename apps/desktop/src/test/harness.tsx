@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { useEffect } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { AppRoutes } from "../App";
@@ -80,4 +80,10 @@ export function renderApp(path: string) {
       </AuthProvider>
     </MemoryRouter>,
   );
+}
+
+/** The page's status says `text`. The live region is always there, so a
+ * screen reader hears it change: wait for its words, not for it. */
+export async function said(text: string) {
+  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(text));
 }

@@ -1,6 +1,6 @@
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { apiError, json, MEL, renderApp, stubApi } from "./harness";
+import { apiError, json, MEL, renderApp, said, stubApi } from "./harness";
 
 async function change(current: string, next: string, again = next) {
   const form = await screen.findByRole("form", { name: "Change your password" });
@@ -37,7 +37,7 @@ describe("your account", () => {
       ? new Response(null, { status: 204 }) : null, { me: MEL });
     renderApp("/account");
     const form = await change("correct horse battery", "a brand new password");
-    expect(await screen.findByRole("status")).toHaveTextContent("Password changed.");
+    await said("Password changed.");
     expect(calls.find((c) => c.url === "/api/v1/auth/password")?.body).toEqual({
       current_password: "correct horse battery", new_password: "a brand new password" });
     expect(within(form).getByLabelText("Current password")).toHaveValue("");

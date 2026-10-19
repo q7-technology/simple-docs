@@ -5,7 +5,7 @@ import { Button } from "../ui/Button";
 import { Card, CardTitle } from "../ui/Card";
 import { Chip } from "../ui/Chip";
 import { TextField } from "../ui/Field";
-import { Notice } from "../ui/Notice";
+import { LiveNotices, Notice } from "../ui/Notice";
 import { SectionHeading } from "../ui/SectionHeading";
 
 describe("the Q7 components", () => {
@@ -66,6 +66,21 @@ describe("the Q7 components", () => {
     render(<><Notice>Wrong username or password.</Notice><Notice tone="success">Saved.</Notice></>);
     expect(screen.getByRole("alert")).toHaveTextContent("Wrong username or password.");
     expect(screen.getByRole("status")).toHaveTextContent("Saved.");
+  });
+
+  it("keeps a live status in place before there is anything to say, and changes its words", () => {
+    const { rerender } = render(<LiveNotices said={null} problem={null} />);
+    const status = screen.getByRole("status");
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toHaveAttribute("aria-atomic", "true");
+    expect(status).toBeEmptyDOMElement();
+    expect(screen.queryByRole("alert")).toBeNull();
+    rerender(<LiveNotices said="Saved." problem={null} />);
+    expect(screen.getByRole("status")).toBe(status);
+    expect(status).toHaveTextContent("Saved.");
+    rerender(<LiveNotices said={null} problem="Can't reach Simple Docs right now." />);
+    expect(status).toBeEmptyDOMElement();
+    expect(screen.getByRole("alert")).toHaveTextContent("Can't reach Simple Docs right now.");
   });
 
   it("gives a badge its word in its own casing", () => {

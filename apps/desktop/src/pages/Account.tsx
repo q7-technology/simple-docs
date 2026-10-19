@@ -5,7 +5,7 @@ import { Button } from "../ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/Card";
 import { TextField, useFocusFirstInvalid } from "../ui/Field";
 import { ROLE_NAMES } from "../ui/Layout";
-import { Notice } from "../ui/Notice";
+import { LiveNotices } from "../ui/Notice";
 import { SectionHeading } from "../ui/SectionHeading";
 
 const BLANK = { current_password: "", new_password: "", again: "" };
@@ -54,8 +54,7 @@ export function Account() {
       <SectionHeading accentText="Your" description={me ? `Signed in as ${me.username}, ${article} ${role}.` : undefined}>
         account
       </SectionHeading>
-      {problem && <Notice>{problem}</Notice>}
-      {done && <Notice tone="success">{done}</Notice>}
+      <LiveNotices said={done} problem={problem} />
       <Card className="max-w-panel">
         <CardHeader>
           <CardTitle>Change your password</CardTitle>
